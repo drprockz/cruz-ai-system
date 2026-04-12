@@ -1,8 +1,82 @@
+# ── Environment & secrets ────────────────────────────────────────────────────
 .env
-.env.local
-venv/
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+MANIFEST
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ── Testing & coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+nosetests.xml
+test-results/
+
+# ── Type checkers & linters ──────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# ── Node / frontend ──────────────────────────────────────────────────────────
 node_modules/
+.next/
+.nuxt/
+.cache/
+*.tsbuildinfo
+
+# ── macOS ────────────────────────────────────────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Editors ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
+logs/
+pm2-*.log
+
+# ── Databases & local storage ────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+qdrant_storage/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+.hypothesis/

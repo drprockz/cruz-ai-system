@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 13, 2026
-**Tests passing:** 415 / 415
+**Tests passing:** 450 / 450
 
 ---
 
@@ -47,7 +47,7 @@ Phase 2 is complete. ✅
 | 3.2 | `workers/arq_worker.py` — ARQ background workers (PULSE 6AM, RAW 3AM, REACH 2AM) | ❌ Not built |
 | 3.3 | `agents/reach/reach_agent.py` — Gemini discovery + Qwen personalization + Apollo.io | ❌ Not built |
 | 3.4 | `agents/catch/catch_agent.py` — Whisper transcription + Llama summarization + Notion + Linear | ❌ Not built |
-| 3.5 | `agents/pm/pm_agent.py` — Qwen sprint planning + Linear/JIRA integration | ❌ Not built |
+| 3.5 | `agents/pm/pm_agent.py` — Qwen sprint planning + Linear/JIRA integration | ✅ |
 
 **What's missing to close Phase 3:**
 - `workers/` directory + ARQ worker entrypoint + 3 cron jobs
@@ -104,11 +104,11 @@ Phase 2 is complete. ✅
 |---|---|---|---|
 | 1 — Foundation | ✅ Done | 8 / 8 | 0 |
 | 2 — Core Agents | ✅ Done | 4 / 4 | 0 |
-| 3 — Automation | ⚠️ Partial | 1 / 5 | 4 |
+| 3 — Automation | ⚠️ Partial | 2 / 5 | 3 |
 | 4 — DevOps Pipeline | ❌ Not started | 0 / 4 | 4 |
 | 5 — Intelligence Layer | ❌ Not started | 0 / 4 | 4 |
 | 6 — Production Hardening | ❌ Not started | 0 / 6 | 6 |
-| **Total** | | **13 / 31** | **18** |
+| **Total** | | **14 / 31** | **17** |
 
 **MVP target:** April 26, 2026 (Phase 1 + 2 complete + FORGE/ECHO usable on real client work)
 **Production target:** May 24, 2026 (all 6 phases complete)

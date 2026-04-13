@@ -26,6 +26,7 @@ import uuid as _uuid
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from agents.forge.forge_agent import ForgeAgent
 from agents.echo.echo_agent import EchoAgent
+from agents.pm.pm_agent import PMAgent
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.semantic_memory import SemanticMemoryService
@@ -139,6 +140,7 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
 _TOOL_AGENT_MAP: Dict[str, Any] = {
     "forge": ForgeAgent,
     "echo": EchoAgent,
+    "pm": PMAgent,
 }
 
 

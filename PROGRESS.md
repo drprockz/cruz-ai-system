@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 13, 2026
-**Tests passing:** 661 / 661
+**Tests passing:** 692 / 692
 
 ---
 
@@ -62,7 +62,7 @@ Phase 3 is complete. ✅
 | 4.1 | `agents/qt/qt_agent.py` — pytest, Playwright, Lighthouse, npm audit, test generation | ✅ |
 | 4.2 | `agents/sentinel/sentinel_agent.py` — Claude PR review, OWASP, GitHub inline comments | ✅ |
 | 4.3 | `agents/titan/titan_agent.py` — Vercel/Railway/SSH deploy with approval gate + auto-rollback | ✅ |
-| 4.4 | `agents/mark/mark_agent.py` — OpenAPI spec, JSDoc, README, changelog, Notion docs | ❌ |
+| 4.4 | `agents/mark/mark_agent.py` — OpenAPI spec, JSDoc, README, changelog, Notion docs | ✅ |
 
 ---
 
@@ -101,10 +101,10 @@ Phase 3 is complete. ✅
 | 1 — Foundation | ✅ Done | 8 / 8 | 0 |
 | 2 — Core Agents | ✅ Done | 4 / 4 | 0 |
 | 3 — Automation | ✅ Done | 5 / 5 | 0 |
-| 4 — DevOps Pipeline | ⚠️ Partial | 3 / 4 | 1 |
+| 4 — DevOps Pipeline | ✅ Done | 4 / 4 | 0 |
 | 5 — Intelligence Layer | ❌ Not started | 0 / 4 | 4 |
 | 6 — Production Hardening | ❌ Not started | 0 / 6 | 6 |
-| **Total** | | **20 / 31** | **11** |
+| **Total** | | **21 / 31** | **10** |
 
 **MVP target:** April 26, 2026 (Phase 1 + 2 complete + FORGE/ECHO usable on real client work)
 **Production target:** May 24, 2026 (all 6 phases complete)

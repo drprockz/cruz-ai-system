@@ -29,6 +29,7 @@ from agents.base_agent import AgentInput              # noqa: E402
 from services.conversation import ConversationService  # noqa: E402
 from services.db import get_db_service                # noqa: E402
 from services.ollama import OllamaService             # noqa: E402
+from services.qdrant import get_qdrant_service        # noqa: E402
 from services.voice import VoicePipeline              # noqa: E402
 
 load_dotenv()
@@ -43,8 +44,14 @@ PORT = int(os.getenv("PORT", "3000"))
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     print(f"🚀 CRUZ AI System starting on port {PORT}")
+    # Connect shared services so agents can use them immediately
+    db = get_db_service()
+    await db.connect()
+    qdrant = get_qdrant_service()
+    await qdrant.connect()
     yield
     print("👋 CRUZ AI System shutting down")
+    await db.disconnect()
 
 
 app = FastAPI(
@@ -105,6 +112,14 @@ async def health_check() -> JSONResponse:
             results["ollama"] = {"status": "unreachable", "models": []}
     except Exception as exc:
         results["ollama"] = {"status": f"error: {exc}", "models": []}
+
+    # ── Qdrant ────────────────────────────────────────────────────────────
+    try:
+        qdrant = get_qdrant_service()
+        reachable = await qdrant.health_check()
+        results["qdrant"] = "connected" if reachable else "unreachable"
+    except Exception as exc:
+        results["qdrant"] = f"error: {exc}"
 
     # ── Claude API ────────────────────────────────────────────────────────
     try:

@@ -147,7 +147,8 @@ class TestGeneralAgentProcess:
         )
 
         agent = GeneralAgent()
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client), \
+             patch("agents.general.general_agent.get_db_service"):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -158,3 +159,62 @@ class TestGeneralAgentProcess:
 
         assert result["success"] is False
         assert result["error"] is not None
+
+
+class TestGeneralAgentLogging:
+    def _make_mock_client(self, response_text: str = "answer") -> MagicMock:
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=response_text)]
+        mock_message.usage = MagicMock(input_tokens=10, output_tokens=20)
+        mock_client = MagicMock()
+        mock_client.messages = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_message)
+        return mock_client
+
+    async def test_log_called_on_success(self):
+        agent = GeneralAgent()
+        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=self._make_mock_client()), \
+             patch("agents.general.general_agent.get_db_service"):
+            with patch.object(agent, "log", new_callable=AsyncMock) as mock_log:
+                await agent.process({
+                    "task": "hello",
+                    "context": {},
+                    "trace_id": "trace-log-ok",
+                    "conversation_id": "conv-log-001",
+                })
+        mock_log.assert_called_once()
+        assert mock_log.call_args[1]["status"] == "success"
+
+    async def test_log_called_on_error(self):
+        import anthropic as _anthropic
+        mock_client = MagicMock()
+        mock_client.messages = AsyncMock()
+        mock_client.messages.create = AsyncMock(
+            side_effect=_anthropic.APIConnectionError(request=MagicMock())
+        )
+        agent = GeneralAgent()
+        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client), \
+             patch("agents.general.general_agent.get_db_service"):
+            with patch.object(agent, "log", new_callable=AsyncMock) as mock_log:
+                await agent.process({
+                    "task": "anything",
+                    "context": {},
+                    "trace_id": "trace-log-err",
+                    "conversation_id": "conv-log-002",
+                })
+        mock_log.assert_called_once()
+        assert mock_log.call_args[1]["status"] == "error"
+
+    async def test_log_failure_does_not_crash_agent(self):
+        agent = GeneralAgent()
+        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=self._make_mock_client()), \
+             patch("agents.general.general_agent.get_db_service"):
+            with patch.object(agent, "log", new_callable=AsyncMock) as mock_log:
+                mock_log.side_effect = Exception("DB dead")
+                result = await agent.process({
+                    "task": "hello",
+                    "context": {},
+                    "trace_id": "trace-log-fail",
+                    "conversation_id": "conv-log-003",
+                })
+        assert result["success"] is True

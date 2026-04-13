@@ -291,3 +291,36 @@ class TestHealthServiceValues:
              patch("main.anthropic.AsyncAnthropic", return_value=_unhealthy_claude()):
             resp = TestClient(app).get("/health")
         assert resp.json()["claude_api"].startswith("error:")
+
+    def test_has_qdrant_field(self):
+        qdrant_svc = AsyncMock()
+        qdrant_svc.health_check = AsyncMock(return_value=True)
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_qdrant_service", return_value=qdrant_svc):
+            resp = TestClient(app).get("/health")
+        assert "qdrant" in resp.json()
+
+    def test_qdrant_connected_when_healthy(self):
+        qdrant_svc = AsyncMock()
+        qdrant_svc.health_check = AsyncMock(return_value=True)
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_qdrant_service", return_value=qdrant_svc):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["qdrant"] == "connected"
+
+    def test_qdrant_unreachable_when_unhealthy(self):
+        qdrant_svc = AsyncMock()
+        qdrant_svc.health_check = AsyncMock(return_value=False)
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_qdrant_service", return_value=qdrant_svc):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["qdrant"] == "unreachable"

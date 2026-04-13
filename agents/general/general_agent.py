@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
+from services.db import get_db_service
 
 _MODEL = "claude-sonnet-4-6"
 _SYSTEM_PROMPT = (
@@ -40,6 +41,7 @@ class GeneralAgent(BaseAgent):
 
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
+        db = get_db_service()
 
         try:
             client = anthropic.AsyncAnthropic(
@@ -61,6 +63,19 @@ class GeneralAgent(BaseAgent):
             tokens_used: int = response.usage.input_tokens + response.usage.output_tokens
             duration_ms = int((time.monotonic() - start) * 1000)
 
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success",
+                    input_data={"task": input["task"]},
+                    output_data={"result": result_text},
+                    tokens_used=tokens_used,
+                    duration_ms=duration_ms,
+                )
+            except Exception:
+                pass
+
             return AgentOutput(
                 success=True,
                 result=result_text,
@@ -73,4 +88,17 @@ class GeneralAgent(BaseAgent):
             )
 
         except Exception as exc:
-            return self.handle_error(exc, input["trace_id"])
+            output = self.handle_error(exc, input["trace_id"])
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="error",
+                    input_data={"task": input["task"]},
+                    output_data={"error": str(exc)},
+                    tokens_used=0,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                )
+            except Exception:
+                pass
+            return output

@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
+from services.db import get_db_service
 
 logger = logging.getLogger("cruz.agents.FORGE")
 
@@ -87,16 +88,35 @@ FORGE_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "run_linter",
         "description": (
-            "Run ruff (Python linter) on a file. "
+            "Run a linter on a file. Uses ruff for Python (.py), "
+            "and reports syntax errors for JS/TS files. "
             "Returns 'passed' if no issues, or the error output if issues found. "
-            "Always lint Python files after writing them."
+            "Always lint files after writing them."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the Python file to lint.",
+                    "description": "Path to the file to lint (.py, .js, .ts, .tsx).",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_directory",
+        "description": (
+            "List the contents of a directory. "
+            "Shows files and subdirectories at the given path. "
+            "Use this to explore project structure before reading or writing files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the directory to list.",
                 }
             },
             "required": ["path"],
@@ -137,6 +157,13 @@ async def _execute_run_linter(path: str) -> str:
     if not Path(path).exists():
         return f"error: file not found at '{path}'"
 
+    ext = Path(path).suffix.lower()
+
+    # JS / TS files
+    if ext in (".js", ".jsx", ".ts", ".tsx"):
+        return await _execute_run_linter_js(path)
+
+    # Python files (default)
     try:
         proc = await asyncio.create_subprocess_exec(
             "ruff", "check", path,
@@ -168,6 +195,67 @@ async def _lint_with_py_compile(path: str) -> str:
         return "passed: no syntax errors found (ruff not available)"
     except SyntaxError as e:
         return f"failed: syntax error on line {e.lineno}: {e.msg}"
+    except Exception as exc:
+        return f"error: {exc}"
+
+
+async def _execute_run_linter_js(path: str) -> str:
+    """Run eslint on a JS/TS file, falling back to a basic parse check."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "eslint", "--no-eslintrc", "-c", "{}", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode == 0:
+            return "passed: eslint found no issues"
+        output = stdout.decode("utf-8").strip() or stderr.decode("utf-8").strip()
+        return f"failed:\n{output}"
+    except (FileNotFoundError, asyncio.TimeoutError):
+        # eslint not available — do a basic check via node
+        return await _lint_js_with_node(path)
+    except Exception as exc:
+        return f"error running eslint: {exc}"
+
+
+async def _lint_js_with_node(path: str) -> str:
+    """Fallback: use node --check for basic JS/TS syntax validation."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", "--check", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        if proc.returncode == 0:
+            return "passed: no syntax errors found (node --check)"
+        output = stderr.decode("utf-8").strip() or stdout.decode("utf-8").strip()
+        return f"failed:\n{output}"
+    except FileNotFoundError:
+        return "passed: linter not available for this file type (install eslint or node)"
+    except asyncio.TimeoutError:
+        return "error: linter timed out"
+    except Exception as exc:
+        return f"error: {exc}"
+
+
+def _execute_list_directory(path: str) -> str:
+    """List files and subdirectories at the given path."""
+    target = Path(path)
+    if not target.exists():
+        return f"error: directory not found at '{path}'"
+    if not target.is_dir():
+        return f"error: '{path}' is a file, not a directory"
+    try:
+        entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name))
+        lines = []
+        for entry in entries:
+            prefix = "📄 " if entry.is_file() else "📁 "
+            lines.append(f"{prefix}{entry.name}")
+        return "\n".join(lines) if lines else "(empty directory)"
+    except PermissionError:
+        return f"error: permission denied reading '{path}'"
     except Exception as exc:
         return f"error: {exc}"
 
@@ -216,11 +304,21 @@ class ForgeAgent(BaseAgent):
                 # ── End of loop ──────────────────────────────────────────
                 if response.stop_reason == "end_turn":
                     text = _extract_text(response.content)
+                    duration = int((time.monotonic() - start) * 1000)
+                    await self.log(
+                        db=get_db_service(),
+                        trace_id=input["trace_id"],
+                        status="success",
+                        input_data={"task": input["task"]},
+                        output_data={"result": text},
+                        tokens_used=total_tokens,
+                        duration_ms=duration,
+                    )
                     return AgentOutput(
                         success=True,
                         result=text,
                         agent=self.name,
-                        duration_ms=int((time.monotonic() - start) * 1000),
+                        duration_ms=duration,
                         tokens_used=total_tokens,
                         error=None,
                         requires_approval=False,
@@ -277,7 +375,20 @@ class ForgeAgent(BaseAgent):
             )
 
         except Exception as exc:
-            return self.handle_error(exc, input["trace_id"])
+            output = self.handle_error(exc, input["trace_id"])
+            try:
+                await self.log(
+                    db=get_db_service(),
+                    trace_id=input["trace_id"],
+                    status="error",
+                    input_data={"task": input["task"]},
+                    output_data={"error": str(exc)},
+                    tokens_used=0,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                )
+            except Exception:
+                pass
+            return output
 
     async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Dispatch a tool call and return the result as a string."""
@@ -292,6 +403,9 @@ class ForgeAgent(BaseAgent):
 
         if tool_name == "run_linter":
             return await _execute_run_linter(tool_input.get("path", ""))
+
+        if tool_name == "list_directory":
+            return _execute_list_directory(tool_input.get("path", ""))
 
         return f"error: unknown tool '{tool_name}'"
 

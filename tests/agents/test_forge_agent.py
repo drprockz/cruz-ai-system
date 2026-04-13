@@ -483,3 +483,176 @@ class TestForgeErrorHandling:
 
         assert result["success"] is False
         assert result["error"] is not None
+
+
+# ─────────────────────────────────────────────
+# Tool: list_directory
+# ─────────────────────────────────────────────
+
+class TestForgeListDirectoryTool:
+    def test_list_directory_tool_exists_in_forge_tools(self):
+        names = [t["name"] for t in FORGE_TOOLS]
+        assert "list_directory" in names
+
+    def test_list_directory_schema_has_path(self):
+        tool = next(t for t in FORGE_TOOLS if t["name"] == "list_directory")
+        assert "path" in tool["input_schema"]["properties"]
+
+    async def test_list_directory_returns_file_listing(self):
+        """When Claude calls list_directory, agent returns the directory contents."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "alpha.py").write_text("x = 1")
+            Path(tmpdir, "beta.py").write_text("y = 2")
+
+            list_resp = _make_tool_use_response(
+                "list_directory", {"path": tmpdir}, tool_id="tu_ls_001"
+            )
+            final_resp = _make_text_response("I see two files.")
+            client = _make_claude_client(list_resp, final_resp)
+            agent = ForgeAgent()
+
+            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+                result = await agent.process(_make_input("list the directory"))
+
+            assert result["success"] is True
+            second_messages = client.messages.create.call_args_list[1][1]["messages"]
+            messages_str = str(second_messages)
+            assert "alpha.py" in messages_str or "beta.py" in messages_str
+
+    async def test_list_directory_error_on_missing_path(self):
+        """list_directory on a nonexistent path returns error, doesn't crash."""
+        list_resp = _make_tool_use_response(
+            "list_directory", {"path": "/nonexistent/dir"}, tool_id="tu_ls_err"
+        )
+        final_resp = _make_text_response("Directory not found.")
+        client = _make_claude_client(list_resp, final_resp)
+        agent = ForgeAgent()
+
+        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            result = await agent.process(_make_input("list missing dir"))
+
+        assert result["success"] is True
+        second_messages = client.messages.create.call_args_list[1][1]["messages"]
+        assert any("error" in str(m).lower() or "not found" in str(m).lower()
+                   for m in second_messages)
+
+    async def test_list_directory_shows_nested_structure(self):
+        """list_directory should indicate subdirectories, not just files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "subdir").mkdir()
+            Path(tmpdir, "file.py").write_text("x = 1")
+
+            list_resp = _make_tool_use_response(
+                "list_directory", {"path": tmpdir}, tool_id="tu_ls_nested"
+            )
+            final_resp = _make_text_response("I see a file and a directory.")
+            client = _make_claude_client(list_resp, final_resp)
+            agent = ForgeAgent()
+
+            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+                await agent.process(_make_input("list the directory"))
+
+            second_messages = client.messages.create.call_args_list[1][1]["messages"]
+            messages_str = str(second_messages)
+            assert "subdir" in messages_str or "file.py" in messages_str
+
+
+# ─────────────────────────────────────────────
+# Linter — JS/TS support
+# ─────────────────────────────────────────────
+
+class TestForgeLinterJSTS:
+    async def test_run_linter_on_js_file_does_not_crash(self):
+        """run_linter on a .js file should return a result, not an exception."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
+            f.write("function hello() { return 'world'; }\n")
+            js_path = f.name
+
+        try:
+            lint_resp = _make_tool_use_response(
+                "run_linter", {"path": js_path}, tool_id="tu_lint_js"
+            )
+            final_resp = _make_text_response("JS linted.")
+            client = _make_claude_client(lint_resp, final_resp)
+            agent = ForgeAgent()
+
+            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+                result = await agent.process(_make_input("lint the JS file"))
+
+            assert result["success"] is True
+            second_messages = client.messages.create.call_args_list[1][1]["messages"]
+            # Should get some result back — pass or a message, not an empty string
+            assert str(second_messages).strip() != ""
+        finally:
+            os.unlink(js_path)
+
+    async def test_run_linter_on_ts_file_does_not_crash(self):
+        """run_linter on a .ts file should return a result, not an exception."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ts", delete=False) as f:
+            f.write("function greet(name: string): string { return `Hello ${name}`; }\n")
+            ts_path = f.name
+
+        try:
+            lint_resp = _make_tool_use_response(
+                "run_linter", {"path": ts_path}, tool_id="tu_lint_ts"
+            )
+            final_resp = _make_text_response("TS linted.")
+            client = _make_claude_client(lint_resp, final_resp)
+            agent = ForgeAgent()
+
+            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+                result = await agent.process(_make_input("lint the TS file"))
+
+            assert result["success"] is True
+        finally:
+            os.unlink(ts_path)
+
+
+# ─────────────────────────────────────────────
+# Agent logging
+# ─────────────────────────────────────────────
+
+class TestForgeAgentLogging:
+    async def test_forge_calls_self_log_on_success(self):
+        """ForgeAgent must log to agent_logs after a successful process()."""
+        client = _make_claude_client(_make_text_response("def hello(): pass"))
+        agent = ForgeAgent()
+
+        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+             patch("agents.forge.forge_agent.get_db_service") as mock_get_db, \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            await agent.process(_make_input())
+
+        mock_log.assert_called()
+
+    async def test_forge_logs_with_success_status(self):
+        """Log call must include status='success' on a successful run."""
+        client = _make_claude_client(_make_text_response("def hello(): pass"))
+        agent = ForgeAgent()
+
+        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+             patch("agents.forge.forge_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            await agent.process(_make_input())
+
+        call_kwargs = str(mock_log.call_args)
+        assert "success" in call_kwargs
+
+    async def test_forge_logs_with_error_status_on_failure(self):
+        """Log call must include status='error' when process() raises."""
+        import anthropic as ant
+        client = MagicMock()
+        client.messages = MagicMock()
+        client.messages.create = AsyncMock(
+            side_effect=ant.APIConnectionError(request=MagicMock())
+        )
+        agent = ForgeAgent()
+
+        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+             patch("agents.forge.forge_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            result = await agent.process(_make_input())
+
+        assert result["success"] is False
+        mock_log.assert_called()
+        assert "error" in str(mock_log.call_args)

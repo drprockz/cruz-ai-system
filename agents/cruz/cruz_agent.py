@@ -30,6 +30,7 @@ from agents.pm.pm_agent import PMAgent
 from agents.catch.catch_agent import CatchAgent
 from agents.reach.reach_agent import ReachAgent
 from agents.qt.qt_agent import QTAgent
+from agents.sentinel.sentinel_agent import SentinelAgent
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.semantic_memory import SemanticMemoryService
@@ -147,6 +148,7 @@ _TOOL_AGENT_MAP: Dict[str, Any] = {
     "catch": CatchAgent,
     "reach": ReachAgent,
     "qt": QTAgent,
+    "sentinel": SentinelAgent,
 }
 
 

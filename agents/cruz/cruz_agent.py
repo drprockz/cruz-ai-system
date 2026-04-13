@@ -28,6 +28,7 @@ from agents.forge.forge_agent import ForgeAgent
 from agents.echo.echo_agent import EchoAgent
 from agents.pm.pm_agent import PMAgent
 from agents.catch.catch_agent import CatchAgent
+from agents.reach.reach_agent import ReachAgent
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.semantic_memory import SemanticMemoryService
@@ -143,6 +144,7 @@ _TOOL_AGENT_MAP: Dict[str, Any] = {
     "echo": EchoAgent,
     "pm": PMAgent,
     "catch": CatchAgent,
+    "reach": ReachAgent,
 }
 
 

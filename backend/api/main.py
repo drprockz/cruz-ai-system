@@ -14,7 +14,7 @@ import anthropic
 import psycopg2
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ from agents.base_agent import AgentInput              # noqa: E402
 from services.conversation import ConversationService  # noqa: E402
 from services.db import get_db_service                # noqa: E402
 from services.ollama import OllamaService             # noqa: E402
+from services.voice import VoicePipeline              # noqa: E402
 
 load_dotenv()
 
@@ -386,6 +387,27 @@ async def get_conversation_messages(conversation_id: str) -> JSONResponse:
         return JSONResponse(status_code=200, content=history)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# POST /voice/transcribe — audio bytes → text via Whisper Large v3
+# ---------------------------------------------------------------------------
+
+@app.post("/voice/transcribe")
+async def voice_transcribe(file: UploadFile = File(...)) -> JSONResponse:
+    """
+    Transcribe an uploaded audio file using Whisper Large v3 (local).
+
+    Args:
+        file: Multipart audio upload (WAV, MP3, OGG, etc.)
+
+    Returns:
+        {"text": "<transcription>"} — empty string if audio is silent or unclear.
+    """
+    audio_bytes = await file.read()
+    pipeline = VoicePipeline()
+    text = await pipeline.transcribe(audio_bytes)
+    return JSONResponse(status_code=200, content={"text": text})
 
 
 if __name__ == "__main__":

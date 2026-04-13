@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 13, 2026
-**Tests passing:** 383 / 383
+**Tests passing:** 407 / 407
 
 ---
 
@@ -30,7 +30,7 @@
 |---|---|---|
 | 2.1 | `agents/forge/forge_agent.py` — real tools: read_file, write_file, run_linter (Python+JS/TS), list_directory, agentic loop, agent logging | ✅ |
 | 2.2 | `agents/echo/echo_agent.py` — Qwen 14B via Ollama, approval gate, Claude fallback, agent logging | ✅ |
-| 2.3 | `services/voice.py` — Whisper STT + Inworld TTS + Porcupine wake word | ❌ Not built |
+| 2.3 | `services/voice.py` — Whisper Large v3 STT (lazy load), speak() stub, `POST /voice/transcribe` endpoint | ✅ |
 | 2.4 | Integration test: FORGE + ECHO end-to-end | ❌ Not built |
 
 **What's missing to close Phase 2:**

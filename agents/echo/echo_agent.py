@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Optional
 
-import anthropic  # imported so tests can assert it is NOT called
+import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
+from services.db import get_db_service
 from services.ollama import OllamaService
 from typing_extensions import TypedDict
 
@@ -64,55 +66,110 @@ class EchoAgent(BaseAgent):
 
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
+        db = get_db_service()
 
         try:
-            ollama = OllamaService()
-
-            prompt = (
-                f"{_SYSTEM_PROMPT}\n\n"
-                f"User request: {input['task']}"
+            draft, tokens_used = await self._draft_with_ollama(input["task"])
+        except (ConnectionError, OSError, Exception) as ollama_exc:
+            logger.warning(
+                "[%s] Ollama unavailable (%s) — falling back to Claude",
+                input["trace_id"],
+                ollama_exc,
             )
+            try:
+                draft, tokens_used = await self._draft_with_claude(input["task"])
+            except Exception as claude_exc:
+                output = self.handle_error(claude_exc, input["trace_id"])
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"task": input["task"]},
+                        output_data={"error": str(claude_exc)},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                return output
 
-            response = await ollama.generate(
-                model=_MODEL,
-                prompt=prompt,
-            )
-
-            raw_text: str = response.get("response", "")
-            draft = _parse_draft(raw_text)
-
-            if draft is None:
-                return AgentOutput(
-                    success=False,
-                    result=None,
-                    agent=self.name,
+        if draft is None:
+            err = "Could not parse a valid email draft from model response"
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="error",
+                    input_data={"task": input["task"]},
+                    output_data={"error": err},
+                    tokens_used=tokens_used,
                     duration_ms=int((time.monotonic() - start) * 1000),
-                    tokens_used=0,
-                    error=f"Could not parse a valid email draft from model response: {raw_text[:200]}",
-                    requires_approval=False,
-                    approval_prompt=None,
                 )
-
-            approval_prompt = (
-                f"Send this email?\n"
-                f"  To: {draft['to']}\n"
-                f"  Subject: {draft['subject']}\n\n"
-                f"Reply 'yes' to send or 'no' to discard."
-            )
-
+            except Exception:
+                pass
             return AgentOutput(
-                success=True,
-                result=draft,
+                success=False,
+                result=None,
                 agent=self.name,
                 duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,  # Ollama is local — no cloud token cost
-                error=None,
-                requires_approval=True,
-                approval_prompt=approval_prompt,
+                tokens_used=tokens_used,
+                error=err,
+                requires_approval=False,
+                approval_prompt=None,
             )
 
-        except Exception as exc:
-            return self.handle_error(exc, input["trace_id"])
+        approval_prompt = (
+            f"Send this email?\n"
+            f"  To: {draft['to']}\n"
+            f"  Subject: {draft['subject']}\n\n"
+            f"Reply 'yes' to send or 'no' to discard."
+        )
+
+        duration = int((time.monotonic() - start) * 1000)
+        try:
+            await self.log(
+                db=db,
+                trace_id=input["trace_id"],
+                status="success",
+                input_data={"task": input["task"]},
+                output_data={"draft": dict(draft)},
+                tokens_used=tokens_used,
+                duration_ms=duration,
+            )
+        except Exception:
+            pass
+
+        return AgentOutput(
+            success=True,
+            result=draft,
+            agent=self.name,
+            duration_ms=duration,
+            tokens_used=tokens_used,
+            error=None,
+            requires_approval=True,
+            approval_prompt=approval_prompt,
+        )
+
+    async def _draft_with_ollama(self, task: str):
+        """Call Qwen via Ollama. Returns (draft, tokens_used) or raises."""
+        ollama = OllamaService()
+        prompt = f"{_SYSTEM_PROMPT}\n\nUser request: {task}"
+        response = await ollama.generate(model=_MODEL, prompt=prompt)
+        raw_text: str = response.get("response", "")
+        return _parse_draft(raw_text), 0  # local — no cloud token cost
+
+    async def _draft_with_claude(self, task: str):
+        """Fallback: call Claude when Ollama is unavailable. Returns (draft, tokens_used)."""
+        client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",  # cheapest model for drafting
+            max_tokens=1024,
+            messages=[{"role": "user", "content": f"{_SYSTEM_PROMPT}\n\nUser request: {task}"}],
+        )
+        raw_text = response.content[0].text
+        tokens_used = response.usage.input_tokens + response.usage.output_tokens
+        return _parse_draft(raw_text), tokens_used
 
 
 # ─────────────────────────────────────────────

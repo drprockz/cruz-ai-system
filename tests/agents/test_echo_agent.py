@@ -342,3 +342,162 @@ class TestEchoErrorHandling:
             result = await agent.process(_make_input())
 
         assert result["result"] is None
+
+
+# ─────────────────────────────────────────────
+# Agent logging
+# ─────────────────────────────────────────────
+
+class TestEchoAgentLogging:
+    async def test_echo_calls_self_log_on_success(self):
+        """EchoAgent must log to agent_logs after a successful draft."""
+        agent = EchoAgent()
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(return_value=_make_ollama_json_response(
+            "a@b.com", "Subject", "Body"
+        ))
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            await agent.process(_make_input())
+
+        mock_log.assert_called()
+
+    async def test_echo_logs_with_success_status(self):
+        agent = EchoAgent()
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(return_value=_make_ollama_json_response(
+            "a@b.com", "S", "B"
+        ))
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            await agent.process(_make_input())
+
+        assert "success" in str(mock_log.call_args)
+
+    async def test_echo_logs_with_error_status_on_failure(self):
+        agent = EchoAgent()
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(side_effect=Exception("Ollama down"))
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            result = await agent.process(_make_input())
+
+        assert result["success"] is False
+        mock_log.assert_called()
+        assert "error" in str(mock_log.call_args)
+
+    async def test_echo_logs_trace_id(self):
+        agent = EchoAgent()
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(return_value=_make_ollama_json_response(
+            "a@b.com", "S", "B"
+        ))
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch.object(agent, "log", new=AsyncMock()) as mock_log:
+            await agent.process({
+                "task": "draft email",
+                "context": {},
+                "trace_id": "unique-echo-trace-xyz",
+                "conversation_id": "conv-001",
+            })
+
+        assert "unique-echo-trace-xyz" in str(mock_log.call_args)
+
+
+# ─────────────────────────────────────────────
+# Claude fallback when Ollama unavailable
+# ─────────────────────────────────────────────
+
+class TestEchoClaudeFallback:
+    async def test_falls_back_to_claude_when_ollama_unavailable(self):
+        """When Ollama raises ConnectionError, ECHO must try Claude instead."""
+        import json
+        draft_json = json.dumps({
+            "to": "client@example.com",
+            "subject": "Project update",
+            "body": "Hi, here is the update.",
+        })
+
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(
+            side_effect=ConnectionError("Ollama not running")
+        )
+
+        mock_claude_msg = MagicMock()
+        mock_claude_msg.content = [MagicMock(text=draft_json)]
+
+        mock_claude = MagicMock()
+        mock_claude.messages = MagicMock()
+        mock_claude.messages.create = AsyncMock(return_value=mock_claude_msg)
+
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.anthropic.AsyncAnthropic", return_value=mock_claude):
+            result = await agent.process(_make_input("email client about project"))
+
+        assert result["success"] is True
+        assert result["requires_approval"] is True
+        assert result["result"]["to"] == "client@example.com"
+
+    async def test_fallback_result_still_requires_approval(self):
+        """Approval gate must still fire even when Claude drafted the email."""
+        import json
+        draft_json = json.dumps({
+            "to": "boss@work.com",
+            "subject": "Leave request",
+            "body": "I need tomorrow off.",
+        })
+
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(
+            side_effect=ConnectionError("Ollama down")
+        )
+
+        mock_claude_msg = MagicMock()
+        mock_claude_msg.content = [MagicMock(text=draft_json)]
+
+        mock_claude = MagicMock()
+        mock_claude.messages = MagicMock()
+        mock_claude.messages.create = AsyncMock(return_value=mock_claude_msg)
+
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.anthropic.AsyncAnthropic", return_value=mock_claude):
+            result = await agent.process(_make_input())
+
+        assert result["requires_approval"] is True
+
+    async def test_returns_failure_when_both_ollama_and_claude_fail(self):
+        """If both Ollama and Claude fail, return success=False with error."""
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(
+            side_effect=ConnectionError("Ollama down")
+        )
+
+        mock_claude = MagicMock()
+        mock_claude.messages = MagicMock()
+        mock_claude.messages.create = AsyncMock(
+            side_effect=Exception("Claude API error")
+        )
+
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.anthropic.AsyncAnthropic", return_value=mock_claude):
+            result = await agent.process(_make_input())
+
+        assert result["success"] is False
+        assert result["error"] is not None

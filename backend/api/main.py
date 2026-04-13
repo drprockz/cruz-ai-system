@@ -30,6 +30,7 @@ from services.conversation import ConversationService  # noqa: E402
 from services.db import get_db_service                # noqa: E402
 from services.ollama import OllamaService             # noqa: E402
 from services.qdrant import get_qdrant_service        # noqa: E402
+from services.redis_client import get_redis_service   # noqa: E402
 from services.voice import VoicePipeline              # noqa: E402
 
 load_dotenv()
@@ -44,13 +45,16 @@ PORT = int(os.getenv("PORT", "3000"))
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     print(f"🚀 CRUZ AI System starting on port {PORT}")
-    # Connect shared services so agents can use them immediately
     db = get_db_service()
     await db.connect()
+    redis = get_redis_service()
+    await redis.connect()
     qdrant = get_qdrant_service()
     await qdrant.connect()
     yield
     print("👋 CRUZ AI System shutting down")
+    await qdrant.disconnect()
+    await redis.disconnect()
     await db.disconnect()
 
 
@@ -423,6 +427,106 @@ async def voice_transcribe(file: UploadFile = File(...)) -> JSONResponse:
     pipeline = VoicePipeline()
     text = await pipeline.transcribe(audio_bytes)
     return JSONResponse(status_code=200, content={"text": text})
+
+
+# ---------------------------------------------------------------------------
+# POST /conversations — start a new conversation
+# ---------------------------------------------------------------------------
+
+class NewConversationRequest(BaseModel):
+    device: Optional[str] = Field(None, description="Originating device: phone | ipad | thinkpad | web")
+
+
+@app.post("/conversations")
+async def create_conversation(request: NewConversationRequest = NewConversationRequest()) -> JSONResponse:
+    """
+    Start a new conversation and return its UUID.
+
+    The caller stores the returned conversation_id and passes it on
+    subsequent POST /command calls for continuity across turns.
+
+    201  — conversation created, returns {"conversation_id": "<uuid>"}
+    """
+    conversation_id = str(uuid.uuid4())
+    db = get_db_service()
+    await db.execute(
+        "INSERT INTO conversations (id, device) VALUES ($1, $2)",
+        conversation_id,
+        request.device,
+    )
+    return JSONResponse(status_code=201, content={"conversation_id": conversation_id})
+
+
+# ---------------------------------------------------------------------------
+# GET /agents/status — per-agent last run time + status
+# ---------------------------------------------------------------------------
+
+@app.get("/agents/status")
+async def agents_status() -> JSONResponse:
+    """
+    Return the most recent log entry per agent from agent_logs.
+
+    Used by dashboards and monitoring to see which agents ran and when.
+    Always returns 200 — empty list when no logs exist.
+
+    Each entry: {agent, status, last_run}
+    """
+    db = get_db_service()
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT ON (agent)
+            agent,
+            status,
+            created_at::text AS last_run
+        FROM agent_logs
+        ORDER BY agent, created_at DESC
+        """
+    )
+    return JSONResponse(
+        status_code=200,
+        content=[dict(row) for row in rows],
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /tasks — list tasks with optional status filter
+# ---------------------------------------------------------------------------
+
+@app.get("/tasks")
+async def get_tasks(status: Optional[str] = None) -> JSONResponse:
+    """
+    List tasks, optionally filtered by status.
+
+    Query params:
+      status  — "pending" | "done" | "error" (omit for all)
+
+    Always returns 200 — empty list when no matching tasks.
+    """
+    db = get_db_service()
+    if status:
+        rows = await db.fetch(
+            """
+            SELECT id, agent, title, status, priority,
+                   created_at::text AS created_at
+            FROM tasks
+            WHERE status = $1
+            ORDER BY priority ASC, created_at DESC
+            """,
+            status,
+        )
+    else:
+        rows = await db.fetch(
+            """
+            SELECT id, agent, title, status, priority,
+                   created_at::text AS created_at
+            FROM tasks
+            ORDER BY priority ASC, created_at DESC
+            """
+        )
+    return JSONResponse(
+        status_code=200,
+        content=[dict(row) for row in rows],
+    )
 
 
 if __name__ == "__main__":

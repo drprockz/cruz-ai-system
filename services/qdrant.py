@@ -55,6 +55,13 @@ class QdrantService:
         self.client = AsyncQdrantClient(url=self.url)
         logger.info("QdrantService connected to %s", self.url)
 
+    async def disconnect(self) -> None:
+        """Close the async Qdrant client."""
+        if self.client is not None:
+            await self.client.close()
+            self.client = None
+            logger.info("QdrantService disconnected")
+
     # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------

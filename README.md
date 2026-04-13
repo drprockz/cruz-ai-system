@@ -95,7 +95,7 @@ cruz-ai-system/
 │   ├── embedding.py           # all-MiniLM-L6-v2 embeddings
 │   └── semantic_memory.py     # Semantic memory (store + search)
 ├── migrations/                # Alembic versioned migrations
-├── tests/                     # 366 tests — agents, api, services
+├── tests/                     # 796 tests — agents, api, services (all mocked)
 ├── docs/superpowers/specs/    # Design documents
 ├── CLAUDE.md                  # Full project bible
 └── PROGRESS.md                # Build progress tracker
@@ -217,11 +217,15 @@ See [PROGRESS.md](PROGRESS.md) for detailed task tracking.
 | 1 — Foundation | ✅ Done | BaseAgent, DB, CRUZ, POST /command, SSE, memory |
 | 2 — Core Agents | ⚠️ Partial | FORGE + ECHO shells done; voice pipeline pending |
 | 3 — Automation | ⚠️ Partial | Semantic memory done; REACH/CATCH/PM/ARQ pending |
-| 4 — DevOps | ❌ Not started | QT, SENTINEL, TITAN, MARK |
-| 5 — Intelligence | ❌ Not started | RAW, PULSE, cross-device, React Native |
+| 4 — DevOps | ⚠️ Scope done (4/4) | QT, SENTINEL, TITAN, MARK (integrations partial — see PROGRESS.md) |
+| 5 — Intelligence | ⚠️ 3/4 | RAW, PULSE, cross-device done; React Native app pending |
 | 6 — Production | ❌ Not started | PM2, monitoring, Cloudflare, load testing |
 
-**366 tests passing.**
+**796 tests passing (all mock-based — no real integration tests yet).**
+
+> ⚠️ **See [PROGRESS.md](./PROGRESS.md) "Reality Gaps" section** — phases 2-5 have scope-complete
+> tasks but spec-level integrations (email send, GitHub comments, Notion, deploy rollback, TTS)
+> are missing. First-run smoke test on 2026-04-13 surfaced ~20 gaps.
 
 ---
 

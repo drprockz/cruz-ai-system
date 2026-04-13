@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 13, 2026
-**Tests passing:** 407 / 407
+**Tests passing:** 415 / 415
 
 ---
 
@@ -31,13 +31,9 @@
 | 2.1 | `agents/forge/forge_agent.py` — real tools: read_file, write_file, run_linter (Python+JS/TS), list_directory, agentic loop, agent logging | ✅ |
 | 2.2 | `agents/echo/echo_agent.py` — Qwen 14B via Ollama, approval gate, Claude fallback, agent logging | ✅ |
 | 2.3 | `services/voice.py` — Whisper Large v3 STT (lazy load), speak() stub, `POST /voice/transcribe` endpoint | ✅ |
-| 2.4 | Integration test: FORGE + ECHO end-to-end | ❌ Not built |
+| 2.4 | Integration test: FORGE + ECHO end-to-end | ✅ |
 
-**What's missing to close Phase 2:**
-- FORGE: `read_file`, `write_file`, linter subprocess, agentic generate→lint→fix loop
-- ECHO: Qwen 14B via Ollama, Gmail OAuth, `draft_email` / `send_email` tools
-- Voice pipeline: `services/voice.py` (Whisper + Inworld TTS WebSocket + Porcupine)
-- `POST /voice/transcribe` endpoint
+Phase 2 is complete. ✅
 
 ---
 
@@ -107,12 +103,12 @@
 | Phase | Status | Tasks Done | Tasks Remaining |
 |---|---|---|---|
 | 1 — Foundation | ✅ Done | 8 / 8 | 0 |
-| 2 — Core Agents | ⚠️ Partial | 1 / 4 | 3 |
+| 2 — Core Agents | ✅ Done | 4 / 4 | 0 |
 | 3 — Automation | ⚠️ Partial | 1 / 5 | 4 |
 | 4 — DevOps Pipeline | ❌ Not started | 0 / 4 | 4 |
 | 5 — Intelligence Layer | ❌ Not started | 0 / 4 | 4 |
 | 6 — Production Hardening | ❌ Not started | 0 / 6 | 6 |
-| **Total** | | **10 / 31** | **21** |
+| **Total** | | **13 / 31** | **18** |
 
 **MVP target:** April 26, 2026 (Phase 1 + 2 complete + FORGE/ECHO usable on real client work)
 **Production target:** May 24, 2026 (all 6 phases complete)

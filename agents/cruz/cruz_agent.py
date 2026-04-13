@@ -37,6 +37,8 @@ from agents.raw.raw_agent import RawAgent
 from agents.pulse.pulse_agent import PulseAgent
 from services.conversation import ConversationService
 from services.db import get_db_service
+from services.device_handoff import DeviceHandoffService
+from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
 from services.embedding import get_embedding_service
@@ -192,12 +194,45 @@ class CruzAgent(BaseAgent):
             sem_service = SemanticMemoryService(get_qdrant_service(), get_embedding_service())
             semantic_hits = await sem_service.search_similar(input["task"], limit=10)
 
-            # Order: [semantic context] [session history] [new user message]
+            # Order: [semantic context] [session history] [handoff note?] [new user message]
             messages: List[Dict[str, Any]] = [
                 *semantic_hits,
                 *history,
-                {"role": "user", "content": input["task"]},
             ]
+
+            # ── Cross-device handoff detection ────────────────────────────
+            device = input["context"].get("device")
+            if device:
+                try:
+                    handoff = DeviceHandoffService(get_redis_service())
+                    switched, last_device = await handoff.detect_switch(
+                        conversation_id, device
+                    )
+                    if switched and last_device:
+                        await handoff.publish_switch(
+                            conversation_id, last_device, device
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[System: User switched from {last_device} to {device}. "
+                                f"Acknowledge the device switch briefly and continue naturally.]"
+                            ),
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"Welcome back on {device}. Picking up where you left off."
+                            ),
+                        })
+                except Exception as handoff_exc:
+                    logger.warning(
+                        "[%s] Device handoff check failed (non-fatal): %s",
+                        input["trace_id"],
+                        handoff_exc,
+                    )
+
+            messages.append({"role": "user", "content": input["task"]})
 
             # Agentic loop: continue until end_turn or approval gate hit
             while True:

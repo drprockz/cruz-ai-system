@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 13, 2026
-**Tests passing:** 765 / 765
+**Tests passing:** 796 / 796
 
 ---
 
@@ -74,7 +74,7 @@ Phase 3 is complete. ✅
 |---|---|---|
 | 5.1 | `agents/raw/raw_agent.py` — Llama 3.1 8B, dependency updates, tech research → Qdrant | ✅ |
 | 5.2 | `agents/pulse/pulse_agent.py` — 6AM briefing: calendar, overnight tasks, client alerts | ✅ |
-| 5.3 | Cross-device handoff — Redis pub/sub device-switch detection, proactive context surfacing | ❌ |
+| 5.3 | Cross-device handoff — Redis pub/sub device-switch detection, proactive context surfacing | ✅ |
 | 5.4 | React Native app — voice interface, conversation history, task dashboard, push notifications | ❌ |
 
 ---
@@ -104,7 +104,7 @@ Phase 3 is complete. ✅
 | 4 — DevOps Pipeline | ✅ Done | 4 / 4 | 0 |
 | 5 — Intelligence Layer | ❌ Not started | 0 / 4 | 4 |
 | 6 — Production Hardening | ❌ Not started | 0 / 6 | 6 |
-| **Total** | | **23 / 31** | **8** |
+| **Total** | | **24 / 31** | **7** |
 
 **MVP target:** April 26, 2026 (Phase 1 + 2 complete + FORGE/ECHO usable on real client work)
 **Production target:** May 24, 2026 (all 6 phases complete)

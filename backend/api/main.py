@@ -241,6 +241,7 @@ class CommandRequest(BaseModel):
     command: str = Field(..., min_length=1, description="User's natural-language command")
     trace_id: Optional[str] = Field(None, description="Optional trace ID for request tracing")
     conversation_id: Optional[str] = Field(None, description="Existing conversation ID to continue")
+    device: Optional[str] = Field(None, description="Originating device: phone | ipad | thinkpad | mac_mini | web")
     stream: bool = Field(False, description="If True, respond with an SSE stream instead of JSON")
 
 
@@ -315,7 +316,7 @@ async def command(request: CommandRequest):
     agent = CruzAgent()
     agent_input: AgentInput = {
         "task": request.command,
-        "context": {},
+        "context": {"device": request.device},
         "trace_id": trace_id,
         "conversation_id": conversation_id,
     }

@@ -21,6 +21,7 @@ the package isn't installed (tests patch it in).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import tempfile
@@ -38,6 +39,8 @@ logger = logging.getLogger("cruz.services.voice")
 
 _WHISPER_MODEL = "openai/whisper-large-v3"
 _INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice"
+_INWORLD_MODEL = "inworld-tts-1.5-max"
+_INWORLD_DEFAULT_VOICE = "default--ypb7u4pb7ydy8zij82pta__jarvis_20"  # JARVIS preset
 
 
 class VoicePipeline:
@@ -121,16 +124,29 @@ class VoicePipeline:
             ) from say_exc
 
     async def _speak_inworld(self, text: str, api_key: str) -> bytes:
-        """POST to Inworld TTS REST API, return audio bytes."""
-        voice_id = os.environ.get("INWORLD_VOICE_ID", "").strip() or "default"
+        """
+        POST to Inworld TTS non-streaming endpoint, return raw MP3 bytes.
+
+        Real API contract (per docs.inworld.ai):
+          - Auth:    "Authorization: Basic <api_key>"  (key already base64-encoded)
+          - Payload: {text, voiceId, modelId, timestampType, audioConfig.speakingRate, temperature}
+          - Response: {"audioContent": "<base64-mp3>", "timestampInfo": {...}}
+        """
+        voice_id = (
+            os.environ.get("INWORLD_VOICE_ID", "").strip()
+            or _INWORLD_DEFAULT_VOICE
+        )
         payload = {
             "text": text,
-            "voice": {"id": voice_id},
-            "format": "mp3",
+            "voiceId": voice_id,
+            "modelId": _INWORLD_MODEL,
+            "timestampType": "WORD",
+            "audioConfig": {"speakingRate": 1.05},
+            "temperature": 0.9,
         }
         async with httpx.AsyncClient(
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Basic {api_key}",
                 "Content-Type": "application/json",
             },
             timeout=30.0,
@@ -140,7 +156,11 @@ class VoicePipeline:
             raise RuntimeError(
                 f"Inworld TTS HTTP {resp.status_code} — {resp.text[:200]}"
             )
-        return resp.content
+        data = resp.json()
+        encoded = data.get("audioContent") or ""
+        if not encoded:
+            raise RuntimeError("Inworld TTS response missing audioContent")
+        return base64.b64decode(encoded)
 
     async def _speak_say(self, text: str) -> bytes:
         """Run macOS `say` and capture AIFF bytes from stdout."""

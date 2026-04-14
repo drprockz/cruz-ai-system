@@ -166,11 +166,21 @@ class TestVoicePipelineLazyLoading:
 import os
 
 
+import base64
+
+
 def _mock_inworld_response(status: int = 200, audio: bytes = b"MP3DATA"):
+    """
+    Mock Inworld TTS non-streaming response.
+
+    Real API returns JSON: {"audioContent": "<base64-mp3>", "timestampInfo": {...}}
+    """
     resp = MagicMock()
     resp.status_code = status
-    resp.content = audio
     resp.text = "" if status < 300 else "unauthorized"
+    resp.json = MagicMock(return_value={
+        "audioContent": base64.b64encode(audio).decode("ascii"),
+    })
     return resp
 
 
@@ -190,8 +200,64 @@ class TestVoicePipelineSpeak:
         env = {"INWORLD_API_KEY": "inworld_test", "INWORLD_VOICE_ID": "jarvis-v1"}
         with patch.dict(os.environ, env, clear=False), pc:
             audio = await VoicePipeline().speak("Hello Darshan")
+        # Must be the decoded MP3 bytes, not the base64 string
         assert audio == b"IDKAUDIO123"
         client.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_speak_posts_to_non_streaming_endpoint(self):
+        """Endpoint: https://api.inworld.ai/tts/v1/voice (non-streaming)."""
+        resp = _mock_inworld_response()
+        pc, client = _patch_inworld_httpx(resp)
+        with patch.dict(os.environ, {"INWORLD_API_KEY": "k"}, clear=False), pc:
+            await VoicePipeline().speak("hi")
+        url = client.post.call_args[0][0]
+        assert url == "https://api.inworld.ai/tts/v1/voice"
+
+    @pytest.mark.asyncio
+    async def test_speak_uses_basic_auth_not_bearer(self):
+        """Inworld uses Basic auth; the API key is already base64-encoded."""
+        resp = _mock_inworld_response()
+        with patch("services.voice.httpx.AsyncClient") as cls:
+            inner = AsyncMock()
+            inner.__aenter__ = AsyncMock(return_value=inner)
+            inner.__aexit__ = AsyncMock(return_value=None)
+            inner.post = AsyncMock(return_value=resp)
+            cls.return_value = inner
+            with patch.dict(os.environ, {"INWORLD_API_KEY": "SECRETKEY"},
+                            clear=False):
+                await VoicePipeline().speak("hi")
+        headers = cls.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Basic SECRETKEY"
+
+    @pytest.mark.asyncio
+    async def test_speak_payload_uses_camelcase_fields(self):
+        """Non-streaming payload: voiceId, modelId, audioConfig.speakingRate, temperature."""
+        resp = _mock_inworld_response()
+        pc, client = _patch_inworld_httpx(resp)
+        env = {
+            "INWORLD_API_KEY": "k",
+            "INWORLD_VOICE_ID": "default--ypb7u4pb7ydy8zij82pta__jarvis_20",
+        }
+        with patch.dict(os.environ, env, clear=False), pc:
+            await VoicePipeline().speak("Deploy complete")
+        payload = client.post.call_args.kwargs["json"]
+        assert payload["text"] == "Deploy complete"
+        assert payload["voiceId"] == \
+            "default--ypb7u4pb7ydy8zij82pta__jarvis_20"
+        assert payload["modelId"] == "inworld-tts-1.5-max"
+        assert payload["audioConfig"]["speakingRate"] == 1.05
+        assert payload["temperature"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_speak_default_voice_is_jarvis_20(self):
+        resp = _mock_inworld_response()
+        pc, client = _patch_inworld_httpx(resp)
+        with patch.dict(os.environ, {"INWORLD_API_KEY": "k", "INWORLD_VOICE_ID": ""},
+                        clear=False), pc:
+            await VoicePipeline().speak("hi")
+        assert client.post.call_args.kwargs["json"]["voiceId"] == \
+            "default--ypb7u4pb7ydy8zij82pta__jarvis_20"
 
     @pytest.mark.asyncio
     async def test_speak_falls_back_to_say_when_no_key(self):
@@ -235,18 +301,6 @@ class TestVoicePipelineSpeak:
                    AsyncMock(return_value=bad_proc)):
             with pytest.raises(RuntimeError, match="TTS"):
                 await VoicePipeline().speak("Hello")
-
-    @pytest.mark.asyncio
-    async def test_speak_sends_text_and_voice_id_to_inworld(self):
-        resp = _mock_inworld_response(audio=b"OK")
-        pc, client = _patch_inworld_httpx(resp)
-        env = {"INWORLD_API_KEY": "k", "INWORLD_VOICE_ID": "darshan-voice"}
-        with patch.dict(os.environ, env, clear=False), pc:
-            await VoicePipeline().speak("Deploy complete")
-        payload = client.post.call_args.kwargs["json"]
-        blob = str(payload)
-        assert "Deploy complete" in blob
-        assert "darshan-voice" in blob
 
 
 # ─────────────────────────────────────────────

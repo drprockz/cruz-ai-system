@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 14, 2026
-**Tests passing:** 1035 / 1035 mocked + 10 skipped (9 real-PostgreSQL integration tests opt-in via `DATABASE_URL_TEST`; 1 locust import guard when `locust` not installed)
+**Tests passing:** 1070 / 1070 mocked + 10 skipped (9 real-PostgreSQL integration tests opt-in via `DATABASE_URL_TEST`; 1 locust import guard when `locust` not installed)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -146,10 +146,25 @@
 (running `docker compose --profile monitoring up -d` + `cloudflared service
 install`) is the only remaining step; the readiness checklist covers it.
 
+## Architecture upgrades (2026-04-14)
+
+- **LLMRouter** — `services/llm/` now exposes a unified `chat()` function that
+  dispatches to **anthropic** / **ollama** / **gemini** based on the
+  `LLM_BACKEND` env var (default: anthropic). CRUZ, FORGE, SENTINEL, and
+  GENERAL were migrated — they no longer instantiate `anthropic.AsyncAnthropic`
+  directly. Duck-typed response shape preserves all existing agent code.
+  Unblocks offline testing via Ollama and cost-free testing via Gemini.
+  `/health` now reports the active `llm_backend`. +35 tests.
+- **Inworld TTS** — fixed to real API spec: Basic auth (key already
+  base64-encoded), camelCase payload (`voiceId`, `modelId`, `audioConfig`),
+  base64-decode `audioContent` from JSON response. Default voice is the
+  JARVIS preset `default--ypb7u4pb7ydy8zij82pta__jarvis_20`.
+
 ## What's next
 
 - **5.4 — React Native app** (voice, conversation history, tasks, push). Only remaining scoped feature.
 - **Ops gating** — 6.2 / 6.4 / 6.5 install steps + run the 72h uptime probe.
+- **Voice daemon** — glue wake-word → STT → /command → TTS → speakers into a single always-listening loop.
 
 ---
 

@@ -19,7 +19,9 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-import anthropic
+import anthropic  # kept for legacy tests that patch agents.cruz.cruz_agent.anthropic
+
+from services.llm import chat as llm_chat
 
 import uuid as _uuid
 
@@ -181,9 +183,10 @@ class CruzAgent(BaseAgent):
         total_tokens = 0
 
         try:
-            client = anthropic.AsyncAnthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY")
-            )
+            # LLM routing happens via services.llm — backend chosen by
+            # LLM_BACKEND env var (anthropic | ollama | gemini). The
+            # response shape is duck-typed to match Anthropic's SDK so
+            # the agentic loop below is backend-agnostic.
 
             # ── Conversation persistence ──────────────────────────────────
             db = get_db_service()
@@ -253,12 +256,11 @@ class CruzAgent(BaseAgent):
 
             # Agentic loop: continue until end_turn or approval gate hit
             while True:
-                response = await client.messages.create(
-                    model=_MODEL,
-                    max_tokens=8096,
+                response = await llm_chat(
                     system=_SYSTEM_PROMPT,
-                    tools=tools,
                     messages=messages,
+                    tools=tools,
+                    max_tokens=8096,
                 )
 
                 total_tokens += response.usage.input_tokens + response.usage.output_tokens

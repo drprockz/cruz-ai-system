@@ -32,7 +32,9 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-import anthropic
+import anthropic  # kept for legacy tests that patch this attribute
+
+from services.llm import chat as llm_chat
 import httpx
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
@@ -311,16 +313,15 @@ class SentinelAgent(BaseAgent):
         self, diff_context: str, trace_id: str
     ) -> tuple[Dict[str, Any], int]:
         """Send diff to Claude and parse review JSON. Returns (review, tokens_used)."""
-        client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        response = await client.messages.create(
-            model=_MODEL,
-            max_tokens=4096,
+        response = await llm_chat(
+            system="",  # SENTINEL folds the system prompt into the user message
             messages=[
                 {
                     "role": "user",
                     "content": f"{_REVIEW_SYSTEM}\n\nPull request diff:\n\n{diff_context}",
                 }
             ],
+            max_tokens=4096,
         )
         raw_text = response.content[0].text
         tokens_used = response.usage.input_tokens + response.usage.output_tokens

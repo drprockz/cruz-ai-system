@@ -226,6 +226,8 @@ async def health_check() -> JSONResponse:
     models_ok = not results["ollama"].get("missing")
 
     results["status"] = "healthy" if (services_ok and models_ok) else "degraded"
+    # Which LLM backend is active for CRUZ/FORGE/SENTINEL/GENERAL
+    results["llm_backend"] = os.environ.get("LLM_BACKEND", "anthropic").strip().lower()
     results["version"] = "0.1.0"
 
     return JSONResponse(status_code=200, content=results)

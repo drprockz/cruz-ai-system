@@ -14,7 +14,9 @@ import os
 import time
 from typing import Any, Dict, List
 
-import anthropic
+import anthropic  # kept for legacy tests that patch this attribute
+
+from services.llm import chat as llm_chat
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
@@ -44,19 +46,14 @@ class GeneralAgent(BaseAgent):
         db = get_db_service()
 
         try:
-            client = anthropic.AsyncAnthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY")
-            )
-
             messages: List[Dict[str, str]] = [
                 {"role": "user", "content": input["task"]}
             ]
 
-            response = await client.messages.create(
-                model=_MODEL,
-                max_tokens=4096,
+            response = await llm_chat(
                 system=_SYSTEM_PROMPT,
                 messages=messages,
+                max_tokens=4096,
             )
 
             result_text: str = response.content[0].text

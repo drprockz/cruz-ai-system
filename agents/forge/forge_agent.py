@@ -21,7 +21,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import anthropic
+import anthropic  # kept for legacy tests that patch this attribute
+
+from services.llm import chat as llm_chat
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
@@ -282,21 +284,16 @@ class ForgeAgent(BaseAgent):
         total_tokens = 0
 
         try:
-            client = anthropic.AsyncAnthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY")
-            )
-
             messages: List[Dict[str, Any]] = [
                 {"role": "user", "content": input["task"]}
             ]
 
             for iteration in range(_MAX_ITERATIONS):
-                response = await client.messages.create(
-                    model=_MODEL,
-                    max_tokens=8096,
+                response = await llm_chat(
                     system=_SYSTEM_PROMPT,
-                    tools=FORGE_TOOLS,
                     messages=messages,
+                    tools=FORGE_TOOLS,
+                    max_tokens=8096,
                 )
 
                 total_tokens += response.usage.input_tokens + response.usage.output_tokens

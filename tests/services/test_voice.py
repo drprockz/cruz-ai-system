@@ -160,18 +160,151 @@ class TestVoicePipelineLazyLoading:
 
 
 # ─────────────────────────────────────────────
-# speak() — Phase 5 stub
+# speak() — Inworld TTS + macOS say fallback (R16)
 # ─────────────────────────────────────────────
 
-class TestVoicePipelineSpeak:
-    async def test_speak_raises_not_implemented(self):
-        """speak() is a Phase 5 stub — must raise NotImplementedError."""
-        with pytest.raises(NotImplementedError):
-            await VoicePipeline().speak("Hello CRUZ")
+import os
 
-    async def test_speak_error_message_mentions_inworld(self):
-        """Error message should reference Inworld TTS so devs know what to implement."""
-        try:
-            await VoicePipeline().speak("hello")
-        except NotImplementedError as e:
-            assert "inworld" in str(e).lower() or "phase" in str(e).lower()
+
+def _mock_inworld_response(status: int = 200, audio: bytes = b"MP3DATA"):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.content = audio
+    resp.text = "" if status < 300 else "unauthorized"
+    return resp
+
+
+def _patch_inworld_httpx(response):
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = AsyncMock(return_value=response)
+    return patch("services.voice.httpx.AsyncClient", return_value=client), client
+
+
+class TestVoicePipelineSpeak:
+    @pytest.mark.asyncio
+    async def test_speak_uses_inworld_when_key_set(self):
+        resp = _mock_inworld_response(audio=b"IDKAUDIO123")
+        pc, client = _patch_inworld_httpx(resp)
+        env = {"INWORLD_API_KEY": "inworld_test", "INWORLD_VOICE_ID": "jarvis-v1"}
+        with patch.dict(os.environ, env, clear=False), pc:
+            audio = await VoicePipeline().speak("Hello Darshan")
+        assert audio == b"IDKAUDIO123"
+        client.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_speak_falls_back_to_say_when_no_key(self):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"AIFFDATA", b""))
+        with patch.dict(os.environ, {"INWORLD_API_KEY": ""}, clear=True), \
+             patch("services.voice.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)):
+            audio = await VoicePipeline().speak("Hi")
+        assert audio == b"AIFFDATA"
+
+    @pytest.mark.asyncio
+    async def test_speak_falls_back_to_say_on_inworld_failure(self):
+        bad_resp = _mock_inworld_response(status=500)
+        pc, _ = _patch_inworld_httpx(bad_resp)
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"FALLBACK", b""))
+
+        env = {"INWORLD_API_KEY": "inworld_test"}
+        with patch.dict(os.environ, env, clear=False), pc, \
+             patch("services.voice.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)):
+            audio = await VoicePipeline().speak("Hello")
+        assert audio == b"FALLBACK"
+
+    @pytest.mark.asyncio
+    async def test_speak_raises_runtime_error_when_both_paths_fail(self):
+        bad_resp = _mock_inworld_response(status=500)
+        pc, _ = _patch_inworld_httpx(bad_resp)
+
+        bad_proc = MagicMock()
+        bad_proc.returncode = 1
+        bad_proc.communicate = AsyncMock(return_value=(b"", b"say: no such"))
+
+        env = {"INWORLD_API_KEY": "inworld_test"}
+        with patch.dict(os.environ, env, clear=False), pc, \
+             patch("services.voice.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=bad_proc)):
+            with pytest.raises(RuntimeError, match="TTS"):
+                await VoicePipeline().speak("Hello")
+
+    @pytest.mark.asyncio
+    async def test_speak_sends_text_and_voice_id_to_inworld(self):
+        resp = _mock_inworld_response(audio=b"OK")
+        pc, client = _patch_inworld_httpx(resp)
+        env = {"INWORLD_API_KEY": "k", "INWORLD_VOICE_ID": "darshan-voice"}
+        with patch.dict(os.environ, env, clear=False), pc:
+            await VoicePipeline().speak("Deploy complete")
+        payload = client.post.call_args.kwargs["json"]
+        blob = str(payload)
+        assert "Deploy complete" in blob
+        assert "darshan-voice" in blob
+
+
+# ─────────────────────────────────────────────
+# WakeWordDetector (R16)
+# ─────────────────────────────────────────────
+
+class TestWakeWordDetector:
+    def test_can_be_imported(self):
+        from services.voice import WakeWordDetector  # noqa: F401
+
+    def test_init_raises_without_access_key(self):
+        from services.voice import WakeWordDetector
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": ""}, clear=True):
+            with pytest.raises(RuntimeError, match="PICOVOICE_ACCESS_KEY"):
+                WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+
+    def test_init_calls_pvporcupine_create(self):
+        from services.voice import WakeWordDetector
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=MagicMock())
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv_test"}, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+        fake_pv.create.assert_called_once()
+        kwargs = fake_pv.create.call_args.kwargs
+        assert kwargs["access_key"] == "pv_test"
+        assert kwargs["keyword_paths"] == ["/tmp/Hey_CRUZ.ppn"]
+
+    def test_detect_returns_true_when_keyword_matches(self):
+        from services.voice import WakeWordDetector
+        handle = MagicMock()
+        handle.process = MagicMock(return_value=0)  # keyword index 0 → match
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=handle)
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            assert det.detect([0] * 512) is True
+
+    def test_detect_returns_false_when_no_match(self):
+        from services.voice import WakeWordDetector
+        handle = MagicMock()
+        handle.process = MagicMock(return_value=-1)
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=handle)
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            assert det.detect([0] * 512) is False
+
+    def test_close_releases_porcupine_handle(self):
+        from services.voice import WakeWordDetector
+        handle = MagicMock()
+        handle.delete = MagicMock()
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=handle)
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            det.close()
+        handle.delete.assert_called_once()

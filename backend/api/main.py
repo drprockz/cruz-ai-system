@@ -465,6 +465,31 @@ async def get_conversation_messages(conversation_id: str) -> JSONResponse:
 # POST /voice/transcribe — audio bytes → text via Whisper Large v3
 # ---------------------------------------------------------------------------
 
+class VoiceSpeakRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Text to synthesise")
+
+
+@app.post("/voice/speak")
+async def voice_speak(request: VoiceSpeakRequest):
+    """
+    Synthesise speech from text.
+
+    Tries Inworld TTS first (requires INWORLD_API_KEY); falls back to
+    macOS `say` on failure. Returns raw audio bytes.
+
+    200 — audio/mpeg (Inworld) or audio/aiff (say fallback)
+    500 — both TTS backends failed
+    """
+    from fastapi.responses import Response
+
+    pipeline = VoicePipeline()
+    try:
+        audio = await pipeline.speak(request.text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return Response(content=audio, media_type="audio/mpeg")
+
+
 @app.post("/voice/transcribe")
 async def voice_transcribe(file: UploadFile = File(...)) -> JSONResponse:
     """

@@ -117,6 +117,60 @@ async def synthesize_and_play(host: str, text: str) -> None:
     _play_audio_bytes(resp.content)
 
 
+async def _fetch_tts(host: str, text: str) -> bytes:
+    """Low-level: fetch TTS bytes for a single sentence; empty on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{host}/voice/speak", json={"text": text},
+            )
+        if resp.status_code >= 300:
+            logger.warning("TTS HTTP %s — %s", resp.status_code, resp.text[:200])
+            return b""
+        return resp.content
+    except Exception as exc:
+        logger.warning("TTS request failed: %s", exc)
+        return b""
+
+
+async def synthesize_and_play_pipelined(host: str, text: str) -> None:
+    """
+    Pipelined TTS: generate audio for every sentence in parallel,
+    play them back in order as each completes.
+
+    First-sentence latency ≈ one TTS call (instead of one long call
+    for the whole reply). Later sentences are already queued by the
+    time the first finishes playing, so playback runs back-to-back
+    with no gaps.
+    """
+    sentences = _split_sentences(text)
+    if not sentences:
+        return
+    # Kick off every TTS fetch in parallel
+    tasks = [asyncio.create_task(_fetch_tts(host, s)) for s in sentences]
+    # Play back in submission order — first sentence reaches speaker asap
+    for task in tasks:
+        audio = await task
+        if audio:
+            _play_audio_bytes(audio)
+
+
+def _split_sentences(text: str) -> list:
+    """
+    Split `text` into sentences using a light regex. Good-enough for
+    spoken-style replies (no need for nltk/spacy). Retains the
+    terminating punctuation on each sentence so TTS prosody stays right.
+    """
+    import re
+    text = (text or "").strip()
+    if not text:
+        return []
+    # Split on end-of-sentence punctuation followed by whitespace.
+    # Keep the punctuation attached via a look-behind.
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def _play_audio_bytes(audio: bytes) -> None:
     """Play raw audio bytes through the default output device.
 
@@ -472,7 +526,9 @@ async def run_one(
     print(f"🤖 CRUZ: {reply}")
 
     print("   🔊 speaking…")
-    await synthesize_and_play(host=host, text=reply)
+    # Pipelined: each sentence is TTS'd in parallel and played in order.
+    # First-sentence latency ≈ single-sentence TTS, not whole-response TTS.
+    await synthesize_and_play_pipelined(host=host, text=reply)
 
 
 async def run_loop(

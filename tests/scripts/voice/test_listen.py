@@ -164,6 +164,79 @@ class TestSynthesizeAndPlay:
         play_mock.assert_not_called()
 
 
+class TestSentenceSplit:
+    """Sentence splitter for pipelined TTS — basic rules, no ML."""
+
+    def test_splits_on_period(self):
+        import listen
+        s = listen._split_sentences("Hello world. How are you.")
+        assert s == ["Hello world.", "How are you."]
+
+    def test_splits_on_question_and_exclamation(self):
+        import listen
+        s = listen._split_sentences("Hi! What's up? Good.")
+        assert s == ["Hi!", "What's up?", "Good."]
+
+    def test_single_sentence_no_terminator(self):
+        import listen
+        s = listen._split_sentences("One sentence no period")
+        assert s == ["One sentence no period"]
+
+    def test_handles_empty_string(self):
+        import listen
+        assert listen._split_sentences("") == []
+
+    def test_trims_whitespace(self):
+        import listen
+        s = listen._split_sentences("  Hi.  \n  There.  ")
+        assert s == ["Hi.", "There."]
+
+
+@pytest.mark.asyncio
+class TestSynthesizeAndPlayPipelined:
+    """Pipelined TTS: generate audio in parallel, play sequentially."""
+
+    async def test_single_sentence_same_as_non_pipelined(self):
+        import listen
+        resp = _bytes_response(b"MP3")
+        client = _mock_httpx_client_with_responses(resp)
+        with patch("listen.httpx.AsyncClient", return_value=client), \
+             patch("listen._play_audio_bytes") as play:
+            await listen.synthesize_and_play_pipelined(
+                host="http://localhost:3000", text="Just one.",
+            )
+        assert play.call_count == 1
+
+    async def test_multi_sentence_generates_each_tts_and_plays_all(self):
+        """Two sentences → two TTS calls (parallel) → two playbacks (serial)."""
+        import listen
+        resp_a = _bytes_response(b"A")
+        resp_b = _bytes_response(b"B")
+        client = _mock_httpx_client_with_responses(resp_a, resp_b)
+        with patch("listen.httpx.AsyncClient", return_value=client), \
+             patch("listen._play_audio_bytes") as play:
+            await listen.synthesize_and_play_pipelined(
+                host="http://localhost:3000",
+                text="Sentence one. Sentence two.",
+            )
+        assert client.post.call_count == 2
+        assert play.call_count == 2
+
+    async def test_one_tts_failure_skips_that_chunk_but_continues(self):
+        """If sentence 1's TTS fails, still play sentence 2."""
+        import listen
+        bad = _bytes_response(b"", status=500)
+        good = _bytes_response(b"OK")
+        client = _mock_httpx_client_with_responses(bad, good)
+        with patch("listen.httpx.AsyncClient", return_value=client), \
+             patch("listen._play_audio_bytes") as play:
+            await listen.synthesize_and_play_pipelined(
+                host="http://localhost:3000",
+                text="Bad. Good.",
+            )
+        assert play.call_count == 1  # only the good one played
+
+
 # ---------------------------------------------------------------------------
 # run_one() — full wake → capture → transcribe → command → speak loop
 # ---------------------------------------------------------------------------
@@ -177,7 +250,7 @@ class TestRunOneOrchestration:
              patch("listen._record_ptt", return_value=b"WAV"), \
              patch("listen.transcribe", new_callable=AsyncMock) as mock_trans, \
              patch("listen.command", new_callable=AsyncMock) as mock_cmd, \
-             patch("listen.synthesize_and_play", new_callable=AsyncMock) as mock_speak:
+             patch("listen.synthesize_and_play_pipelined", new_callable=AsyncMock) as mock_speak:
             mock_trans.return_value = "hello cruz"
             mock_cmd.return_value = "How can I help?"
             await listen.run_one(
@@ -199,7 +272,7 @@ class TestRunOneOrchestration:
              patch("listen._record_ptt", return_value=b"WAV"), \
              patch("listen.transcribe", new_callable=AsyncMock) as mock_trans, \
              patch("listen.command", new_callable=AsyncMock) as mock_cmd, \
-             patch("listen.synthesize_and_play", new_callable=AsyncMock) as mock_speak:
+             patch("listen.synthesize_and_play_pipelined", new_callable=AsyncMock) as mock_speak:
             mock_trans.return_value = ""
             await listen.run_one(host="http://localhost:3000", mode="push-to-talk")
         mock_cmd.assert_not_called()
@@ -213,7 +286,7 @@ class TestRunOneOrchestration:
              patch("listen._record_with_vad", return_value=b"WAV") as mock_vad, \
              patch("listen.transcribe", new_callable=AsyncMock) as mock_trans, \
              patch("listen.command", new_callable=AsyncMock) as mock_cmd, \
-             patch("listen.synthesize_and_play", new_callable=AsyncMock) as mock_speak:
+             patch("listen.synthesize_and_play_pipelined", new_callable=AsyncMock) as mock_speak:
             mock_trans.return_value = "what time is it"
             mock_cmd.return_value = "It's 3pm."
             await listen.run_one(

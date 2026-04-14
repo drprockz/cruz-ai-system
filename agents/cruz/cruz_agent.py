@@ -36,6 +36,7 @@ from agents.mark.mark_agent import MarkAgent
 from agents.raw.raw_agent import RawAgent
 from agents.pulse.pulse_agent import PulseAgent
 from agents.relay.relay_agent import classify
+from services.alerts import get_alert_service
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
@@ -370,6 +371,14 @@ class CruzAgent(BaseAgent):
 
         except Exception as exc:
             output = self.handle_error(exc, input["trace_id"])
+            try:
+                await get_alert_service().notify(
+                    "critical",
+                    "CRUZ unhandled exception",
+                    f"trace_id={input['trace_id']} task={input.get('task','')[:200]} error={exc}",
+                )
+            except Exception:
+                pass
             try:
                 await self.log(
                     db=get_db_service(),

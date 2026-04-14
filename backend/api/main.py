@@ -31,6 +31,7 @@ from services.db import get_db_service                # noqa: E402
 from services.ollama import OllamaService             # noqa: E402
 from services.qdrant import get_qdrant_service        # noqa: E402
 from services.redis_client import get_redis_service   # noqa: E402
+from services.alerts import install_loki_logging      # noqa: E402
 from services.voice import VoicePipeline              # noqa: E402
 
 load_dotenv()
@@ -79,6 +80,24 @@ def _validate_required_env() -> None:
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     _validate_required_env()
+
+    # ── Sentry (optional) ───────────────────────────────────────────────
+    sentry_dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if sentry_dsn:
+        try:
+            import sentry_sdk  # type: ignore
+
+            sentry_sdk.init(
+                dsn=sentry_dsn,
+                environment=os.environ.get("ENVIRONMENT", "development"),
+                traces_sample_rate=0.1,
+            )
+        except Exception as exc:
+            print(f"⚠️  Sentry init failed (non-fatal): {exc}")
+
+    # ── Loki log shipping (optional) ────────────────────────────────────
+    install_loki_logging(labels={"app": "cruz", "component": "api"})
+
     print(f"🚀 CRUZ AI System starting on port {PORT}")
     db = get_db_service()
     await db.connect()

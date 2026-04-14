@@ -18,16 +18,40 @@ import os
 from arq import cron
 from arq.connections import RedisSettings
 
+from services.alerts import get_alert_service
 from workers.tasks.backup_tasks import run_backup
 from workers.tasks.pulse_tasks import run_pulse
 from workers.tasks.raw_tasks import run_raw
 from workers.tasks.reach_tasks import run_reach
 
 
+async def on_job_end(ctx: dict) -> None:
+    """
+    ARQ after_job hook — alert on failed scheduled jobs.
+
+    Fires a critical alert whenever ``ctx['success']`` is False. Alert
+    failures are swallowed inside AlertService so this hook never raises.
+    """
+    if ctx.get("success", True):
+        return
+    fn = ctx.get("function", "unknown")
+    job_id = ctx.get("job_id", "?")
+    exc = ctx.get("exception")
+    try:
+        await get_alert_service().notify(
+            "critical",
+            f"ARQ job failed: {fn}",
+            f"job_id={job_id} function={fn} error={exc}",
+        )
+    except Exception:
+        pass
+
+
 class WorkerSettings:
     """ARQ WorkerSettings — defines scheduled cron jobs and Redis connection."""
 
     functions = [run_pulse, run_raw, run_reach, run_backup]
+    after_job_end = on_job_end
 
     cron_jobs = [
         cron(run_reach, hour=2, minute=0),

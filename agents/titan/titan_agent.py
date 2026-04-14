@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
+from services.alerts import get_alert_service
 from services.db import get_db_service
 
 logger = logging.getLogger("cruz.agents.TITAN")
@@ -135,6 +136,14 @@ class TitanAgent(BaseAgent):
 
             err_msg = deploy_error or "Deploy reported failure"
             duration = int((time.monotonic() - start) * 1000)
+            try:
+                await get_alert_service().notify(
+                    "critical",
+                    f"TITAN deploy failed ({target}/{project})",
+                    f"error={err_msg} rolled_back={deploy_result.get('rolled_back', False)} trace_id={input['trace_id']}",
+                )
+            except Exception:
+                pass
             try:
                 await self.log(
                     db=db,

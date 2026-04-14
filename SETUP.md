@@ -352,3 +352,70 @@ arq workers.arq_worker.WorkerSettings --check
 
 Partial failures are tolerated — if (e.g.) redis-cli is unavailable, the
 other two snapshots still upload and the failure is logged.
+
+---
+
+## Monitoring stack (Phase 6.2)
+
+CRUZ ships with an optional self-hosted monitoring stack: **Uptime Kuma**
+for service probes, **Grafana Loki** for log aggregation, **Grafana** for
+dashboards, and **Sentry** (cloud free tier) for error grouping. Alerts
+fan out to **Telegram**.
+
+### Bring up the stack
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+| Service      | URL                      | Default credentials |
+|--------------|--------------------------|---------------------|
+| Uptime Kuma  | http://localhost:3001    | create on first visit |
+| Grafana      | http://localhost:3002    | admin / admin (change it) |
+| Loki (HTTP)  | http://localhost:3100    | —                   |
+
+### Env vars
+
+```bash
+# Telegram alerts (get token from @BotFather, chat_id from @getidsbot)
+TELEGRAM_BOT_TOKEN=123456:abcdef
+TELEGRAM_CHAT_ID=987654321
+
+# Sentry (optional)
+SENTRY_DSN=https://<publickey>@o0.ingest.sentry.io/0
+
+# Loki log shipping (optional — omit to log to stderr only)
+LOKI_URL=http://localhost:3100
+```
+
+### Uptime Kuma probes to add
+
+After visiting http://localhost:3001 and creating the admin account, add
+monitors for the following endpoints. Recommended interval: **60s**.
+
+| Name          | Type | Target                                      |
+|---------------|------|---------------------------------------------|
+| CRUZ /health  | HTTP | `http://host.docker.internal:3000/health`   |
+| CRUZ /command | HTTP | `http://host.docker.internal:3000/health`   |
+| Qdrant        | HTTP | `http://host.docker.internal:6333/readyz`   |
+| Ollama        | HTTP | `http://host.docker.internal:11434/api/tags`|
+
+Wire notifications → **Telegram** using the same bot token + chat_id as
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+
+### Grafana → Loki datasource
+
+1. Grafana → Connections → Data sources → Add → Loki.
+2. URL: `http://loki:3100` (Docker DNS) or `http://localhost:3100` (host).
+3. Save & test. Explore → `{app="cruz"}` to see live logs.
+
+### What emits alerts automatically
+
+| Source                  | Severity | When                                  |
+|-------------------------|----------|---------------------------------------|
+| `CruzAgent.process`     | critical | Unhandled exception in the main loop  |
+| `TitanAgent.process`    | critical | Deploy failure (Vercel/Railway/SSH)   |
+| `workers.arq_worker`    | critical | Any scheduled ARQ job fails           |
+
+Alert delivery is fire-and-forget — monitoring failures never take CRUZ
+down with them.

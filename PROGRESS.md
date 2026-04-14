@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
-**Last updated:** April 13, 2026
-**Tests passing:** 796 / 796 (all mock-based — no real integration tests yet)
+**Last updated:** April 14, 2026
+**Tests passing:** 814 / 814 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -136,16 +136,16 @@
 Tasks pass their scope tests, but **first-run smoke test (2026-04-13) revealed the system
 crashes before responding to any command** because:
 
-### 🔴 Infrastructure gaps (P0 — blocks any real use)
+### 🔴 Infrastructure gaps (P0 — blocks any real use) — ✅ ALL CLOSED 2026-04-14
 
-| # | Gap | Evidence |
+| # | Gap | Status |
 |---|---|---|
-| R1 | **No PM2 config** — `ecosystem.config.js` missing | CLAUDE.md line 305 requires it. Server dies on reboot. |
-| R2 | **No docker-compose.yml** — Qdrant setup is a manual `docker run` | Spec line 314 lists it. Brittle one-liner. |
-| R3 | **No startup env-var validation** — missing keys fail lazily mid-request | `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` not checked at startup |
-| R4 | **No Ollama model pre-check** — `/health` reports "reachable" even if no models pulled | ECHO/REACH/PM/TITAN/MARK/QT/RAW/PULSE hang when model missing |
-| R5 | **Qdrant service has no connectivity guard** — crashes AttributeError if `.client is None` | `services/qdrant.py:89` — no None check before `collection_exists` |
-| R6 | **No real integration tests** — everything mocks `get_db_service`, `anthropic`, `httpx` | 796 tests, 0 touch the real DB schema |
+| R1 | **No PM2 config** — `ecosystem.config.js` missing | ✅ Written — api + worker with auto-restart, log rotation |
+| R2 | **No docker-compose.yml** — Qdrant setup is a manual `docker run` | ✅ Written — Qdrant primary + optional postgres/redis profile |
+| R3 | **No startup env-var validation** — missing keys fail lazily mid-request | ✅ `_validate_required_env()` — lifespan fails fast on missing ANTHROPIC_API_KEY, DATABASE_URL, REDIS_URL, QDRANT_URL |
+| R4 | **No Ollama model pre-check** — `/health` reports "reachable" even if no models pulled | ✅ `/health` now reports `ollama.required`, `ollama.missing`; status degrades if required model missing |
+| R5 | **Qdrant service has no connectivity guard** — crashes AttributeError if `.client is None` | ✅ `_require_client()` raises clear RuntimeError naming Qdrant URL |
+| R6 | **No real integration tests** — everything mocks `get_db_service`, `anthropic`, `httpx` | ✅ `tests/integration/test_real_db.py` — 9 tests: schema shape, UUID round-trip, BaseAgent.log SQL; skip when `DATABASE_URL_TEST` unset |
 
 ### 🟠 Spec vs implementation gaps (P1 — CLAUDE.md promises vs code)
 
@@ -173,20 +173,32 @@ crashes before responding to any command** because:
 
 ---
 
-## Recommended remediation order
+## Remediation progress
 
-The audit recommends fixing **R1–R6 first** (they block any real run), then **R7–R17**
-(they're the "5 phases of work wasn't wasted but isn't usable yet" set).
+### ✅ P0 complete (2026-04-14) — foundation is now runnable
+- R1 PM2 ecosystem.config.js + `logs/` directory
+- R2 docker-compose.yml (Qdrant primary, optional postgres/redis profile)
+- R3 startup env validation (fail-fast on missing ANTHROPIC_API_KEY etc.)
+- R4 /health reports required Ollama models + degrades status when missing
+- R5 QdrantService None-guards (clear RuntimeError instead of AttributeError)
+- R6 9 real-PostgreSQL integration tests that actually run migrations + exercise SQL
 
-Suggested sequencing:
+### ⏭️ P1 queue (CLAUDE.md promises not yet delivered)
 
-1. **R5** — Add None-check guards to QdrantService (15 min)
-2. **R3** — Startup env-var validation in lifespan (30 min)
-3. **R4** — `/health` reports model list and flags missing required models (30 min)
-4. **R2** — Write `docker-compose.yml` for Qdrant + Redis (20 min)
-5. **R1** — Write `ecosystem.config.js` for PM2 (30 min)
-6. **R6** — Add one real integration test that runs migrations + exercises POST /command against a throwaway DB (2h)
-7. **R18–R20** — Update docs (30 min)
-8. Then tackle R7–R17 in priority order per user need (client-facing: R7 ECHO send → R8 REACH send → R9 SENTINEL → R10 MARK → R11 Notion shared service → rest)
+Tackle in client-value order:
+1. **R7** ECHO send email (Gmail/SendGrid after approval) — unblocks first usable feature
+2. **R8** REACH send outreach — complete the lead-gen loop
+3. **R9** SENTINEL post GitHub inline comments — completes PR review loop
+4. **R10** MARK publish to GitHub/Notion — closes documentation loop
+5. **R11** Shared Notion service (`services/notion.py`) — used by R7, R10, CATCH, RAW, PULSE
+6. **R12** PM JIRA/Linear adapter — currently Plane-only
+7. **R13** CATCH push action items to Linear
+8. **R14** TITAN auto-rollback on failed deploy
+9. **R15** QT Playwright + Lighthouse
+10. **R16** VoicePipeline.speak() + Porcupine wake word
+11. **R17** Decide on RELAY: wire as pre-filter or delete
 
-**Total P0 cleanup: ~4 hours. P1 cleanup: ~1-2 days per integration.**
+### 📝 Docs still drifting (P2)
+- R18 README test count ✅ fixed
+- R19 SETUP.md ollama pull instructions ✅ fixed
+- R20 Troubleshooting guide still TODO

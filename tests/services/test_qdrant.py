@@ -296,3 +296,33 @@ class TestQdrantServiceSearch:
         results = await svc.search("memories", [0.0] * 384, limit=10)
 
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# None-guard contract (R5) — methods must raise RuntimeError when not connected,
+# never AttributeError. This prevents cryptic crashes when Qdrant is down.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestQdrantServiceNoneGuards:
+    async def test_ensure_collection_raises_runtime_error_when_not_connected(self):
+        svc = QdrantService()
+        # Never called svc.connect(), so svc.client is None
+        with pytest.raises(RuntimeError, match="not connected"):
+            await svc.ensure_collection("memories", 384)
+
+    async def test_upsert_raises_runtime_error_when_not_connected(self):
+        svc = QdrantService()
+        with pytest.raises(RuntimeError, match="not connected"):
+            await svc.upsert("memories", "id-1", [0.0] * 384, {"role": "user"})
+
+    async def test_search_raises_runtime_error_when_not_connected(self):
+        svc = QdrantService()
+        with pytest.raises(RuntimeError, match="not connected"):
+            await svc.search("memories", [0.0] * 384, limit=5)
+
+    async def test_runtime_error_names_the_service(self):
+        """The error must mention Qdrant so the operator knows what to start."""
+        svc = QdrantService()
+        with pytest.raises(RuntimeError, match=r"(?i)qdrant"):
+            await svc.ensure_collection("memories", 384)

@@ -324,3 +324,81 @@ class TestHealthServiceValues:
              patch("main.get_qdrant_service", return_value=qdrant_svc):
             resp = TestClient(app).get("/health")
         assert resp.json()["qdrant"] == "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# R4 — required Ollama model availability
+# ---------------------------------------------------------------------------
+
+def _ollama_with_models(models: list[str]):
+    svc = AsyncMock()
+    svc.health_check = AsyncMock(return_value=True)
+    svc.list_models = AsyncMock(return_value=models)
+    return svc
+
+
+class TestHealthOllamaRequiredModels:
+    """
+    /health must expose which Ollama models are required by CRUZ agents and
+    which are actually loaded. Status degrades to 'degraded' when required
+    models are missing because agents will hang or fall back to Claude.
+    """
+
+    def test_ollama_response_has_required_models_list(self):
+        """Response must expose ollama.required so operators know what to pull."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        ollama = resp.json()["ollama"]
+        assert "required" in ollama
+        assert "qwen2.5-coder:14b" in ollama["required"]
+        assert "llama3.1:8b" in ollama["required"]
+
+    def test_ollama_response_has_missing_models_list(self):
+        """Response must expose ollama.missing so operators can fix."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert "missing" in resp.json()["ollama"]
+
+    def test_missing_empty_when_all_required_loaded(self):
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["ollama"]["missing"] == []
+
+    def test_missing_lists_qwen_when_only_llama_loaded(self):
+        ollama = _ollama_with_models(["llama3.1:8b"])
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=ollama), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["ollama"]["missing"] == ["qwen2.5-coder:14b"]
+
+    def test_missing_lists_both_when_no_models_loaded(self):
+        ollama = _ollama_with_models([])
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=ollama), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        missing = resp.json()["ollama"]["missing"]
+        assert "qwen2.5-coder:14b" in missing
+        assert "llama3.1:8b" in missing
+
+    def test_status_degraded_when_required_model_missing(self):
+        """Even if every service is 'reachable', missing models degrade status."""
+        ollama = _ollama_with_models([])  # no models pulled
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=ollama), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["status"] == "degraded"

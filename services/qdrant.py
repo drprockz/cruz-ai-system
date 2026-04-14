@@ -62,6 +62,16 @@ class QdrantService:
             self.client = None
             logger.info("QdrantService disconnected")
 
+    def _require_client(self) -> AsyncQdrantClient:
+        """Raise a clear error if connect() was never called."""
+        if self.client is None:
+            raise RuntimeError(
+                "QdrantService is not connected. Call await qdrant.connect() "
+                "first (or verify Qdrant is running at "
+                f"{self.url})."
+            )
+        return self.client
+
     # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------
@@ -86,11 +96,12 @@ class QdrantService:
 
         Uses cosine distance — appropriate for sentence-transformer embeddings.
         """
-        exists = await self.client.collection_exists(name)
+        client = self._require_client()
+        exists = await client.collection_exists(name)
         if exists:
             return
 
-        await self.client.create_collection(
+        await client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
@@ -116,7 +127,8 @@ class QdrantService:
             vector:     Dense embedding (must match collection vector_size).
             payload:    Arbitrary metadata stored alongside the vector.
         """
-        await self.client.upsert(
+        client = self._require_client()
+        await client.upsert(
             collection_name=collection,
             points=[PointStruct(id=id, vector=vector, payload=payload)],
         )
@@ -138,7 +150,8 @@ class QdrantService:
           score   : float  — cosine similarity (higher = more similar)
           payload : dict   — the metadata stored at upsert time
         """
-        hits = await self.client.search(
+        client = self._require_client()
+        hits = await client.search(
             collection_name=collection,
             query_vector=query_vector,
             limit=limit,

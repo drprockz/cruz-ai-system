@@ -91,14 +91,20 @@ psql postgres -c "CREATE DATABASE cruz_db OWNER cruz;"
 brew services start redis
 ```
 
-### Qdrant (Docker)
+### Qdrant (Docker — preferred)
 ```bash
-docker run -d \
-  --name qdrant \
-  --restart unless-stopped \
-  -p 6333:6333 \
-  -v $(pwd)/qdrant_storage:/qdrant/storage \
-  qdrant/qdrant
+# Start Docker Desktop first, then:
+docker compose up -d qdrant
+
+# Verify:
+docker compose ps                        # should list cruz-qdrant as healthy
+curl http://localhost:6333/healthz       # should return {"title":"qdrant"}
+```
+
+Raw equivalent (if you don't want Docker Compose):
+```bash
+docker run -d --name cruz-qdrant --restart unless-stopped \
+  -p 6333:6333 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
 ```
 
 ### Ollama + models
@@ -139,6 +145,24 @@ curl http://localhost:11434/api/tags # should list your Ollama models
 
 ## Step 7 — Start CRUZ
 
+### Production (recommended — 24/7 auto-restart via PM2)
+
+```bash
+# Install PM2 once (requires Node.js):
+npm install -g pm2
+
+# Start CRUZ API + ARQ worker:
+pm2 start ecosystem.config.js
+pm2 status                         # should show cruz-api and cruz-worker online
+pm2 logs                           # tail combined logs
+
+# Persist across reboots (follow the command pm2 prints):
+pm2 save
+pm2 startup
+```
+
+### Development (foreground)
+
 ```bash
 source venv/bin/activate
 python backend/api/main.py
@@ -150,25 +174,51 @@ You should see:
 INFO:     Uvicorn running on http://0.0.0.0:3000
 ```
 
+> **Startup validation (R3):** If any of `ANTHROPIC_API_KEY`, `DATABASE_URL`,
+> `REDIS_URL`, or `QDRANT_URL` are missing/empty in `.env`, CRUZ refuses to
+> start and prints exactly which variables to fix. No silent failures.
+
 ---
 
 ## Step 8 — Test it
 
 ```bash
-# Full health check (all services)
+# Full health check — reports status per service + required Ollama models
 curl http://localhost:3000/health | python3 -m json.tool
+```
 
+The health payload now includes `ollama.required`, `ollama.missing`, and
+overall `status` downgrades to `"degraded"` when any required model is missing.
+That is how you know to run `ollama pull`.
+
+```bash
 # Talk to CRUZ
 curl -X POST http://localhost:3000/command \
   -H "Content-Type: application/json" \
-  -d '{"command": "What can you help me with?", "stream": false}'
+  -d '{"command": "What can you help me with?", "device": "mac_mini", "stream": false}'
 
-# Run the test suite
+# Run the mock-based test suite (no services needed)
 source venv/bin/activate
 pytest tests/ -v
 ```
 
-Expected: `366 passed`
+Expected: `814 passed, 9 skipped`
+
+### Real-DB integration tests (opt-in)
+
+The 9 skipped tests verify migrations apply cleanly and SQL round-trips
+against real PostgreSQL. Opt in by pointing at a throwaway DB:
+
+```bash
+# Create throwaway DB (one-time):
+psql postgres -c "CREATE DATABASE cruz_test_db OWNER drprockz;"
+
+# Run real-DB integration tests:
+export DATABASE_URL_TEST="postgresql://drprockz@localhost:5432/cruz_test_db"
+pytest tests/integration/test_real_db.py -v
+```
+
+Expected: `9 passed`. These tests drop+recreate the schema on each run.
 
 ---
 

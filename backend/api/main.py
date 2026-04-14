@@ -41,9 +41,44 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 PORT = int(os.getenv("PORT", "3000"))
 
 
+_REQUIRED_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "QDRANT_URL",
+)
+
+# Ollama models required by CRUZ agents. Missing means agents hang or must
+# fall back to Claude (expensive + defeats the point of local inference).
+#   qwen2.5-coder:14b — ECHO, REACH, PM, TITAN, MARK, QT
+#   llama3.1:8b       — RAW, PULSE
+_REQUIRED_OLLAMA_MODELS = (
+    "qwen2.5-coder:14b",
+    "llama3.1:8b",
+)
+
+
+def _validate_required_env() -> None:
+    """
+    Fail fast if any required environment variable is missing or empty.
+
+    Called at lifespan startup. Deferring these checks to the first agent
+    call leaves operators debugging "why is CRUZ silent at 3 AM" when the
+    real answer is "ANTHROPIC_API_KEY wasn't set."
+    """
+    missing = [var for var in _REQUIRED_ENV_VARS if not os.environ.get(var, "").strip()]
+    if missing:
+        raise RuntimeError(
+            "CRUZ cannot start — required environment variables missing or empty: "
+            f"{', '.join(missing)}. "
+            "Set these in your .env file (see .env.example) and restart."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
+    _validate_required_env()
     print(f"🚀 CRUZ AI System starting on port {PORT}")
     db = get_db_service()
     await db.connect()
@@ -111,11 +146,27 @@ async def health_check() -> JSONResponse:
         reachable = await ollama.health_check()
         if reachable:
             models = await ollama.list_models()
-            results["ollama"] = {"status": "reachable", "models": models}
+            missing = [m for m in _REQUIRED_OLLAMA_MODELS if m not in models]
+            results["ollama"] = {
+                "status": "reachable",
+                "models": models,
+                "required": list(_REQUIRED_OLLAMA_MODELS),
+                "missing": missing,
+            }
         else:
-            results["ollama"] = {"status": "unreachable", "models": []}
+            results["ollama"] = {
+                "status": "unreachable",
+                "models": [],
+                "required": list(_REQUIRED_OLLAMA_MODELS),
+                "missing": list(_REQUIRED_OLLAMA_MODELS),
+            }
     except Exception as exc:
-        results["ollama"] = {"status": f"error: {exc}", "models": []}
+        results["ollama"] = {
+            "status": f"error: {exc}",
+            "models": [],
+            "required": list(_REQUIRED_OLLAMA_MODELS),
+            "missing": list(_REQUIRED_OLLAMA_MODELS),
+        }
 
     # ── Qdrant ────────────────────────────────────────────────────────────
     try:
@@ -139,11 +190,12 @@ async def health_check() -> JSONResponse:
 
     # ── Overall status ────────────────────────────────────────────────────
     critical = [results["postgresql"], results["redis"], results["claude_api"]]
-    all_ok = all(
+    services_ok = all(
         v in ("connected", "reachable") for v in critical
     ) and results["ollama"]["status"] == "reachable"
+    models_ok = not results["ollama"].get("missing")
 
-    results["status"] = "healthy" if all_ok else "degraded"
+    results["status"] = "healthy" if (services_ok and models_ok) else "degraded"
     results["version"] = "0.1.0"
 
     return JSONResponse(status_code=200, content=results)

@@ -142,7 +142,7 @@ class TestForgeEchoSequential:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -168,7 +168,7 @@ class TestForgeEchoSequential:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -193,7 +193,7 @@ class TestForgeEchoSequential:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -219,7 +219,7 @@ class TestForgeEchoSequential:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -249,7 +249,7 @@ class TestForgeEchoSequential:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -283,7 +283,7 @@ class TestForgeOnly:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -314,7 +314,7 @@ class TestForgeOnly:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=mock_claude), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=mock_claude.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -388,19 +388,15 @@ class TestForgeRealFileIO:
 
             agent = CruzAgent()
 
-            # CruzAgent's Claude is cruz_claude; ForgeAgent's Claude is forge_claude
-            call_count = {"n": 0}
-
-            def pick_client(**kwargs):
-                call_count["n"] += 1
-                # First instantiation → CruzAgent's client
-                # Second instantiation → ForgeAgent's client
-                return cruz_claude if call_count["n"] == 1 else forge_claude
-
-            # Note: forge_agent.anthropic and cruz_agent.anthropic are the same
-            # module object — one patch covers both. pick_client returns
-            # cruz_claude on the 1st call (CruzAgent) and forge_claude on the 2nd (ForgeAgent).
-            with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", side_effect=pick_client), \
+            # Each agent imports `llm_chat` from services.llm into its own
+            # module namespace — so we patch the names CruzAgent and
+            # ForgeAgent each bound locally. That lets us route CRUZ's
+            # LLM calls to `cruz_claude.messages.create` and FORGE's to
+            # `forge_claude.messages.create` independently.
+            with patch("agents.cruz.cruz_agent.llm_chat",
+                       new=cruz_claude.messages.create), \
+                 patch("agents.forge.forge_agent.llm_chat",
+                       new=forge_claude.messages.create), \
                  patch("agents.forge.forge_agent.get_db_service"), \
                  patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
                  patch("agents.cruz.cruz_agent.get_db_service"), \

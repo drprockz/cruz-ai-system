@@ -121,12 +121,16 @@ class TestCruzRelayPrefilter:
         from agents.cruz.cruz_agent import CruzAgent, CRUZ_TOOLS
         claude = _mock_claude(_end_turn_response())
         conv, sem, db, qd, emb = _cruz_patches()
-        with patch("agents.cruz.cruz_agent.classify", return_value="qt"), \
+        # Force classify() to return a name that is NOT advertised in
+        # CRUZ_TOOLS. 'nonexistent-agent' isn't a real tool, so the
+        # pre-filter should fall back to the full tool list.
+        with patch("agents.cruz.cruz_agent.classify",
+                   return_value="nonexistent-agent"), \
              patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic",
                    return_value=claude), conv, sem, db, qd, emb:
             await CruzAgent().process(_make_input("Run some tests"))
         sent_tools = claude.messages.create.call_args.kwargs["tools"]
-        # qt is not in CRUZ_TOOLS — must not narrow to empty
+        # Unknown tool hint — must not narrow to empty
         assert len(sent_tools) == len(CRUZ_TOOLS)
 
     async def test_prefilter_does_not_short_circuit_claude_call(self):

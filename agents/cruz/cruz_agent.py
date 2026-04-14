@@ -54,12 +54,17 @@ _MODEL = "claude-sonnet-4-6"
 _SYSTEM_PROMPT = """You are CRUZ, a world-class personal AI assistant — the FRIDAY to a developer's Tony Stark.
 
 You have access to specialist tools for specific tasks:
-- **forge**: Write, review, or modify code
-- **echo**: Draft or send emails and messages
-- **reach**: Find leads or prospect new clients
-- **titan**: Deploy applications or run infrastructure tasks
-- **catch**: Transcribe or summarise meetings
-- **pm**: Create or update tasks and project management tickets
+- **forge**: Write, review, or modify code — functions, components, fixes, tests
+- **echo**: Draft or send emails and messages — client replies, outreach
+- **reach**: Find leads or prospect new clients — discovery + personalised cold email
+- **pm**: Create or update tasks and project management tickets (Plane.so)
+- **catch**: Transcribe meetings, extract action items, save notes
+- **qt**: Run tests and quality gates — pytest, Playwright, Lighthouse, npm audit
+- **sentinel**: Review pull requests for bugs and security issues
+- **titan**: Deploy applications — Vercel, Railway, SSH — with rollback on failure
+- **mark**: Generate docs — OpenAPI, JSDoc, README, CHANGELOG; publish to GitHub/Notion
+- **raw**: Research tech topics or scan for dependency updates; store in Qdrant
+- **pulse**: Compile a morning briefing from calendar + overnight research + pending tasks
 
 For simple questions, answer directly without using tools.
 For tasks that match a specialist, use the appropriate tool.
@@ -143,6 +148,113 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "task": {"type": "string", "description": "The project management task."}
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "qt",
+        "description": (
+            "Run tests, security scans, and quality gates. Use for: running "
+            "pytest / Playwright / Lighthouse, auditing npm dependencies for "
+            "vulnerabilities, or generating new unit tests for given code."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "What to test or scan. Include test_type in context "
+                        "(pytest | npm_audit | playwright | lighthouse | generate)."
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "sentinel",
+        "description": (
+            "Review a pull request for bugs, security issues, or style. "
+            "Fetches the PR diff from GitHub and returns structured review "
+            "findings. Can optionally post inline comments back to the PR."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "The review task. Include repo ('owner/name') and "
+                        "pr_number in context."
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "mark",
+        "description": (
+            "Generate documentation: OpenAPI specs, JSDoc comments, README "
+            "files, or CHANGELOG entries from commit messages. Can publish "
+            "to GitHub and/or Notion after approval."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Docs to generate. Include doc_type (openapi | jsdoc | "
+                        "readme | changelog) and project in context."
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "raw",
+        "description": (
+            "Research tech topics or scan dependencies for updates. Writes "
+            "findings into Qdrant semantic memory so later agents (PULSE, "
+            "CRUZ) can retrieve them. Use for 'research X', 'check for pip "
+            "outdated', dependency update digests."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Topic to research, or 'dependencies' for a pip-"
+                        "outdated scan. Include mode (research | dependencies) "
+                        "in context."
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "pulse",
+        "description": (
+            "Generate a morning briefing combining today's calendar events, "
+            "overnight RAW research from Qdrant, recent agent activity, and "
+            "pending tasks. Read-only; no approval required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Briefing focus (e.g. 'today' or a specific date). "
+                        "Defaults to current day."
+                    ),
+                },
             },
             "required": ["task"],
         },

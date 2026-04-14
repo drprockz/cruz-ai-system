@@ -298,6 +298,41 @@ async def _wait_for_wake(detector) -> None:
         stream.close()
 
 
+def _dump_last_utterance(wav_bytes: bytes) -> None:
+    """
+    Save captured audio to /tmp/cruz_last_utterance.wav and print peak RMS.
+
+    Lets operators `afplay /tmp/cruz_last_utterance.wav` to hear what the
+    mic actually captured when Whisper comes back empty.
+    """
+    path = "/tmp/cruz_last_utterance.wav"
+    try:
+        with open(path, "wb") as f:
+            f.write(wav_bytes)
+        # Also compute peak RMS for a quick sanity check
+        try:
+            import wave as _wave
+            import numpy as np
+            with _wave.open(path, "rb") as w:
+                frames = w.readframes(w.getnframes())
+            samples = np.frombuffer(frames, dtype=np.int16)
+            if len(samples) == 0:
+                print(f"   📁 saved → {path} (EMPTY!)")
+                return
+            rms = float(np.sqrt(np.mean(samples.astype(np.int32) ** 2)))
+            peak = int(np.max(np.abs(samples)))
+            print(f"   📁 saved → {path}  size={len(wav_bytes)/1024:.1f}KB "
+                  f"rms={rms:.0f} peak={peak}")
+            if peak < 200:
+                print(f"   ⚠️  peak is very low ({peak}) — mic likely not "
+                      f"picking up your voice. Check input device "
+                      f"(System Settings → Sound → Input).")
+        except Exception:
+            print(f"   📁 saved → {path}  size={len(wav_bytes)/1024:.1f}KB")
+    except OSError as exc:
+        print(f"   (could not save diagnostic WAV: {exc})")
+
+
 def _pcm_to_wav_bytes(pcm: bytes) -> bytes:
     """Wrap raw int16 PCM bytes into a WAV container."""
     bio = io.BytesIO()
@@ -330,7 +365,9 @@ async def run_one(
         # Fixed-duration recording — simpler and more reliable than VAD.
         # User gets a guaranteed 6-second window to speak.
         wav_bytes = _record_ptt(duration_ms=6000)
-        print(f"   captured {len(wav_bytes) / 1024:.1f} KB")
+        # Diagnostic: save the last utterance so we can inspect/replay
+        # what the mic actually captured when transcription comes back empty.
+        _dump_last_utterance(wav_bytes)
     elif mode == "push-to-talk":
         input("🎙️  Press Enter to talk… ")
         wav_bytes = _record_ptt()

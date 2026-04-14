@@ -665,3 +665,174 @@ class TestCatchAgentParseFailure:
             mock_ollama_cls.return_value = mock_ollama
             result = await CatchAgent().process(_make_input())
         assert result["requires_approval"] is False
+
+
+# ─────────────────────────────────────────────
+# R13 — Send mode (context["send"]=True → create Plane issues for action items)
+# ─────────────────────────────────────────────
+
+from agents.catch.catch_agent import CatchAgent  # noqa: E402
+
+
+def _make_send_input(
+    task: str = "Summarise client sync",
+    workspace_slug: str = "simpleinc",
+    project_id: str = "proj-xyz",
+) -> AgentInput:
+    return {
+        "task": task,
+        "context": {
+            "send": True,
+            "workspace_slug": workspace_slug,
+            "project_id": project_id,
+        },
+        "trace_id": "trace-catch-send",
+        "conversation_id": "conv-catch-send",
+    }
+
+
+def _mock_plane_service(results=None, raises=None):
+    svc = MagicMock()
+    if raises is not None:
+        svc.create_issue = AsyncMock(side_effect=raises)
+    elif isinstance(results, list):
+        svc.create_issue = AsyncMock(side_effect=results)
+    else:
+        svc.create_issue = AsyncMock(
+            return_value=results or {
+                "created": True,
+                "issue_id": "issue-1",
+                "url": "https://pm.simpleinc.cloud/simpleinc/projects/p/issues/issue-1",
+            }
+        )
+    return svc
+
+
+@pytest.mark.asyncio
+class TestCatchSendMode:
+    async def test_send_true_creates_issue_per_action_item(self):
+        plane = _mock_plane_service()
+        notes = _meeting_notes_json(
+            action_items=[
+                "Darshan: deploy staging by Friday",
+                "Ateet: send brand assets",
+                "Darshan: schedule design review",
+            ],
+        )
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            await CatchAgent().process(_make_send_input())
+        assert plane.create_issue.call_count == 3
+
+    async def test_send_true_uses_action_item_as_title(self):
+        plane = _mock_plane_service()
+        notes = _meeting_notes_json(
+            action_items=["Darshan: deploy staging by Friday"],
+        )
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            await CatchAgent().process(_make_send_input())
+        kwargs = plane.create_issue.call_args.kwargs
+        assert kwargs["title"] == "Darshan: deploy staging by Friday"
+
+    async def test_description_references_meeting_title(self):
+        plane = _mock_plane_service()
+        notes = _meeting_notes_json(
+            title="AMA Weekly Sync",
+            action_items=["x: do y"],
+        )
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            await CatchAgent().process(_make_send_input())
+        desc = plane.create_issue.call_args.kwargs.get("description", "")
+        assert "AMA Weekly Sync" in desc
+
+    async def test_send_true_passes_workspace_and_project(self):
+        plane = _mock_plane_service()
+        notes = _meeting_notes_json(action_items=["x: do y"])
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            await CatchAgent().process(
+                _make_send_input(workspace_slug="simpleinc", project_id="proj-xyz")
+            )
+        kwargs = plane.create_issue.call_args.kwargs
+        assert kwargs["workspace_slug"] == "simpleinc"
+        assert kwargs["project_id"] == "proj-xyz"
+
+    async def test_send_true_returns_requires_approval_false(self):
+        plane = _mock_plane_service()
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_meeting_notes_json()))
+            ollama_cls.return_value = mo
+            result = await CatchAgent().process(_make_send_input())
+        assert result["requires_approval"] is False
+
+    async def test_result_has_created_and_failed_counts(self):
+        plane = _mock_plane_service()
+        notes = _meeting_notes_json(
+            action_items=["a: 1", "b: 2"],
+        )
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            result = await CatchAgent().process(_make_send_input())
+        assert result["result"]["created_count"] == 2
+        assert result["result"]["failed_count"] == 0
+
+    async def test_partial_failure_non_fatal(self):
+        plane = _mock_plane_service(results=[
+            {"created": True, "issue_id": "ok-1", "url": "u"},
+            RuntimeError("Plane 500"),
+        ])
+        notes = _meeting_notes_json(action_items=["a: 1", "b: 2"])
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService", return_value=plane), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(notes))
+            ollama_cls.return_value = mo
+            result = await CatchAgent().process(_make_send_input())
+        assert result["success"] is True
+        assert result["result"]["created_count"] == 1
+        assert result["result"]["failed_count"] == 1
+
+    async def test_send_false_is_default_unchanged(self):
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.PlaneService") as plane_cls, \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_meeting_notes_json()))
+            ollama_cls.return_value = mo
+            result = await CatchAgent().process(_make_input())
+        assert result["requires_approval"] is True
+        plane_cls.assert_not_called()

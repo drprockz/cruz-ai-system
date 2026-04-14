@@ -235,8 +235,8 @@ class TestPMAgentApprovalGate:
             result = await PMAgent().process(_make_input())
         assert "3" in result["approval_prompt"]
 
-    async def test_approval_prompt_mentions_linear(self):
-        """User must know where the tickets will be created."""
+    async def test_approval_prompt_mentions_plane(self):
+        """User must know where the tickets will be created (Plane.so, per stack)."""
         from agents.pm.pm_agent import PMAgent
         with patch("agents.pm.pm_agent.OllamaService") as mock_ollama_cls, \
              patch("agents.pm.pm_agent.get_db_service"):
@@ -245,7 +245,7 @@ class TestPMAgentApprovalGate:
             mock_ollama_cls.return_value = mock_ollama
             result = await PMAgent().process(_make_input())
         prompt_lower = result["approval_prompt"].lower()
-        assert "linear" in prompt_lower
+        assert "plane" in prompt_lower
 
 
 # ─────────────────────────────────────────────
@@ -527,3 +527,143 @@ class TestPMAgentParseFailure:
             result = await PMAgent().process(_make_input())
 
         assert result["requires_approval"] is False
+
+
+# ─────────────────────────────────────────────
+# R12 — Send mode (context["send"]=True → create Plane issues)
+# ─────────────────────────────────────────────
+
+from agents.pm.pm_agent import PMAgent  # noqa: E402
+
+
+def _make_send_input(
+    workspace_slug: str = "simpleinc",
+    project_id: str = "proj-uuid-123",
+) -> AgentInput:
+    return {
+        "task": "Plan AMA sprint",
+        "context": {
+            "send": True,
+            "workspace_slug": workspace_slug,
+            "project_id": project_id,
+        },
+        "trace_id": "trace-pm-send",
+        "conversation_id": "conv-pm-send",
+    }
+
+
+def _mock_plane_service(results=None, raises=None):
+    svc = MagicMock()
+    if raises is not None:
+        svc.create_issue = AsyncMock(side_effect=raises)
+    elif isinstance(results, list):
+        svc.create_issue = AsyncMock(side_effect=results)
+    else:
+        svc.create_issue = AsyncMock(
+            return_value=results or {
+                "created": True,
+                "issue_id": "issue-1",
+                "url": "https://pm.simpleinc.cloud/simpleinc/projects/p/issues/issue-1",
+            }
+        )
+    return svc
+
+
+@pytest.mark.asyncio
+class TestPMSendMode:
+    async def test_send_true_creates_issue_per_task(self):
+        plane = _mock_plane_service()
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            await PMAgent().process(_make_send_input())
+        # Default _sprint_plan_json has 2 tasks
+        assert plane.create_issue.call_count == 2
+
+    async def test_send_true_passes_workspace_and_project(self):
+        plane = _mock_plane_service()
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            await PMAgent().process(
+                _make_send_input(workspace_slug="simpleinc", project_id="proj-xyz")
+            )
+        kwargs = plane.create_issue.call_args_list[0].kwargs
+        assert kwargs["workspace_slug"] == "simpleinc"
+        assert kwargs["project_id"] == "proj-xyz"
+
+    async def test_send_true_passes_title_description_priority_labels(self):
+        plane = _mock_plane_service()
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            await PMAgent().process(_make_send_input())
+
+        first = plane.create_issue.call_args_list[0].kwargs
+        assert first["title"] == "Redesign hero section"
+        assert "hero" in first["description"].lower() or "branding" in first["description"].lower()
+        assert first["priority"] == "high"
+        assert first["labels"] == ["frontend"]
+
+    async def test_send_true_returns_requires_approval_false(self):
+        plane = _mock_plane_service()
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            result = await PMAgent().process(_make_send_input())
+        assert result["requires_approval"] is False
+
+    async def test_send_true_result_has_counts_and_per_ticket_flags(self):
+        plane = _mock_plane_service()
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            result = await PMAgent().process(_make_send_input())
+        assert result["result"]["created_count"] == 2
+        assert result["result"]["failed_count"] == 0
+        tasks = result["result"]["tasks"]
+        assert all(t.get("created") is True for t in tasks)
+        assert all(t.get("issue_id") for t in tasks)
+
+    async def test_partial_failure_non_fatal(self):
+        """One Plane error doesn't abort the rest — success=True overall."""
+        plane = _mock_plane_service(results=[
+            {"created": True, "issue_id": "ok-1", "url": "u1"},
+            RuntimeError("Plane 500"),
+        ])
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService", return_value=plane), \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            result = await PMAgent().process(_make_send_input())
+        assert result["success"] is True
+        assert result["result"]["created_count"] == 1
+        assert result["result"]["failed_count"] == 1
+
+    async def test_send_false_is_default_unchanged(self):
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.PlaneService") as plane_cls, \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            result = await PMAgent().process(_make_input())
+        assert result["requires_approval"] is True
+        plane_cls.assert_not_called()

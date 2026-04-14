@@ -34,6 +34,7 @@ import anthropic
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.ollama import OllamaService
+from services.plane import PlaneService
 from services.voice import VoicePipeline
 from typing_extensions import TypedDict
 
@@ -180,15 +181,94 @@ class CatchAgent(BaseAgent):
             )
 
         # ── Step 3: Attach transcript and build output ────────────────────
-        full_result: MeetingNotes = {
+        full_result: Dict[str, Any] = {
             **notes,
             "transcript": transcript,
         }
 
         action_count = len(notes["action_items"])
+
+        # ── Send mode: context["send"]=True → Plane issue per action item
+        ctx = input["context"]
+        if ctx.get("send") is True:
+            workspace_slug = ctx.get("workspace_slug", "")
+            project_id = ctx.get("project_id", "")
+            plane_svc = PlaneService()
+            created_count = 0
+            failed_count = 0
+            enriched: List[Dict[str, Any]] = []
+
+            for item in notes["action_items"]:
+                row: Dict[str, Any] = {"action_item": item}
+                try:
+                    issue = await plane_svc.create_issue(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        title=item,
+                        description=(
+                            f"From meeting: **{notes['title']}**\n\n"
+                            f"{notes.get('summary', '')}"
+                        ),
+                    )
+                    row["created"] = True
+                    row["issue_id"] = issue.get("issue_id", "")
+                    row["issue_url"] = issue.get("url", "")
+                    created_count += 1
+                except Exception as exc:
+                    row["created"] = False
+                    row["create_error"] = str(exc)
+                    failed_count += 1
+                    logger.warning(
+                        "[%s] CATCH Plane create failed for '%s': %s",
+                        input["trace_id"], item, exc,
+                    )
+                enriched.append(row)
+
+            send_result = {
+                **full_result,
+                "action_items_with_status": enriched,
+                "created_count": created_count,
+                "failed_count": failed_count,
+            }
+
+            duration = int((time.monotonic() - start) * 1000)
+            any_success = created_count > 0 or action_count == 0
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success" if any_success else "error",
+                    input_data={
+                        "task": input["task"],
+                        "mode": "send",
+                        "workspace_slug": workspace_slug,
+                        "project_id": project_id,
+                    },
+                    output_data={
+                        "created_count": created_count,
+                        "failed_count": failed_count,
+                    },
+                    tokens_used=tokens_used,
+                    duration_ms=duration,
+                )
+            except Exception:
+                pass
+
+            return AgentOutput(
+                success=any_success,
+                result=send_result,
+                agent=self.name,
+                duration_ms=duration,
+                tokens_used=tokens_used,
+                error=None if any_success else "All Plane create_issue calls failed",
+                requires_approval=False,
+                approval_prompt=None,
+            )
+
+        # ── Draft-only (default): approval gate ──────────────────────────
         approval_prompt = (
             f"Save meeting notes to Notion and create {action_count} "
-            f"Linear ticket{'s' if action_count != 1 else ''}?\n"
+            f"Plane issue{'s' if action_count != 1 else ''}?\n"
             f"  Title: {notes['title']}\n"
             f"  Action items: {action_count}\n\n"
             f"Reply 'yes' to save or 'no' to discard."

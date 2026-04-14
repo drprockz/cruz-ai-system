@@ -128,35 +128,42 @@ class TestVoicePipelineTranscribe:
 class TestVoicePipelineLazyLoading:
     def test_whisper_not_loaded_on_instantiation(self):
         """Model must NOT be loaded when VoicePipeline() is created."""
-        with patch("services.voice.pipeline") as mock_pipeline:
+        with patch("services.voice.WhisperModel") as mock_ct:
             VoicePipeline()
-        mock_pipeline.assert_not_called()
+        mock_ct.assert_not_called()
 
     async def test_whisper_loaded_on_first_transcribe(self):
-        """Model IS loaded on the first transcribe() call."""
-        VoicePipeline._whisper_instance = None  # reset singleton for isolation
-        mock_model = MagicMock(return_value={"text": "hi"})
-
-        with patch("services.voice.pipeline", return_value=mock_model) as mock_pipeline_fn:
+        """Model IS loaded on the first transcribe() call (faster-whisper path)."""
+        VoicePipeline._whisper_instance = None
+        VoicePipeline._whisper_runtime = None
+        # faster-whisper returns (segments_iterator, info) — mock that shape
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(
+            return_value=([MagicMock(text="hi")], MagicMock()),
+        )
+        with patch("services.voice.WhisperModel",
+                   return_value=mock_model) as mock_ct:
             p = VoicePipeline()
             await p.transcribe(b"audio")
-
-        mock_pipeline_fn.assert_called_once()
-        VoicePipeline._whisper_instance = None  # clean up
+        mock_ct.assert_called_once()
+        VoicePipeline._whisper_instance = None
 
     async def test_whisper_loaded_once_across_multiple_calls(self):
         """Model is only instantiated once — reused across calls."""
-        VoicePipeline._whisper_instance = None  # reset singleton for isolation
-        mock_model = MagicMock(return_value={"text": "hi"})
-
-        with patch("services.voice.pipeline", return_value=mock_model) as mock_pipeline_fn:
+        VoicePipeline._whisper_instance = None
+        VoicePipeline._whisper_runtime = None
+        mock_model = MagicMock()
+        mock_model.transcribe = MagicMock(
+            return_value=([MagicMock(text="hi")], MagicMock()),
+        )
+        with patch("services.voice.WhisperModel",
+                   return_value=mock_model) as mock_ct:
             p = VoicePipeline()
             await p.transcribe(b"audio1")
             await p.transcribe(b"audio2")
             await p.transcribe(b"audio3")
-
-        mock_pipeline_fn.assert_called_once()
-        VoicePipeline._whisper_instance = None  # clean up after
+        mock_ct.assert_called_once()
+        VoicePipeline._whisper_instance = None
 
 
 # ─────────────────────────────────────────────

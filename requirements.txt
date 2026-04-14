@@ -88,3 +88,4 @@ openwakeword
 sounddevice
 soundfile
 silero-vad
+faster-whisper

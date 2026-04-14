@@ -28,7 +28,18 @@ import tempfile
 from typing import List, Optional, Sequence
 
 import httpx
-from transformers import pipeline
+
+try:  # faster-whisper — our Whisper runtime (CTranslate2, ~4x faster than transformers)
+    from faster_whisper import WhisperModel  # type: ignore
+except ImportError:  # pragma: no cover
+    WhisperModel = None  # type: ignore
+
+# Legacy transformers pipeline kept as a fallback when faster-whisper isn't
+# available (e.g. in a minimal test env). New runs default to faster-whisper.
+try:
+    from transformers import pipeline as _hf_pipeline  # type: ignore
+except ImportError:  # pragma: no cover
+    _hf_pipeline = None  # type: ignore
 
 try:  # lazy — test suite patches services.voice.pvporcupine directly
     import pvporcupine  # type: ignore
@@ -43,12 +54,15 @@ except ImportError:  # pragma: no cover — only needed when backend=openwakewor
 logger = logging.getLogger("cruz.services.voice")
 
 # Whisper model — configurable via WHISPER_MODEL env var.
-# Default 'small' gives ~2s transcribes on Mac Mini M4 CPU with
-# excellent English accuracy. Use 'large-v3' only when you need
-# non-English or nuanced dictation and can tolerate ~30s/call.
-_WHISPER_MODEL = os.environ.get(
-    "WHISPER_MODEL", "openai/whisper-small"
-)
+#
+# faster-whisper accepts short names ("tiny.en" / "small.en" / "medium"
+# / "large-v3") or the full HuggingFace id ("openai/whisper-small").
+# Default `small.en` + int8 quantisation gives ~400-700ms transcribes
+# on Mac Mini M4 CPU with excellent English accuracy (~4x faster than
+# transformers). Override with `WHISPER_MODEL=large-v3` when you need
+# non-English or nuanced dictation.
+_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small.en")
+_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
 _INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice"
 _INWORLD_MODEL = "inworld-tts-1.5-max"
 _INWORLD_DEFAULT_VOICE = "default--ypb7u4pb7ydy8zij82pta__jarvis_20"  # JARVIS preset
@@ -57,18 +71,51 @@ _INWORLD_DEFAULT_VOICE = "default--ypb7u4pb7ydy8zij82pta__jarvis_20"  # JARVIS p
 class VoicePipeline:
     """Whisper STT + Inworld TTS (with macOS say fallback)."""
 
-    _whisper_instance = None  # class-level singleton
+    _whisper_instance = None  # class-level singleton (faster-whisper or HF)
+    _whisper_runtime = None   # "faster-whisper" or "transformers"
 
     def _get_whisper(self):
-        """Lazily load and cache the Whisper model."""
-        if VoicePipeline._whisper_instance is None:
-            logger.info("Loading Whisper model '%s' — first call only", _WHISPER_MODEL)
-            VoicePipeline._whisper_instance = pipeline(
+        """Lazily load and cache the Whisper model (faster-whisper preferred)."""
+        if VoicePipeline._whisper_instance is not None:
+            return VoicePipeline._whisper_instance
+
+        # Preferred: faster-whisper (CTranslate2, ~4x faster than transformers)
+        if WhisperModel is not None:
+            logger.info(
+                "Loading faster-whisper model '%s' (compute_type=%s) — first call only",
+                _WHISPER_MODEL, _WHISPER_COMPUTE_TYPE,
+            )
+            VoicePipeline._whisper_instance = WhisperModel(
+                _WHISPER_MODEL,
+                device="cpu",
+                compute_type=_WHISPER_COMPUTE_TYPE,
+            )
+            VoicePipeline._whisper_runtime = "faster-whisper"
+            return VoicePipeline._whisper_instance
+
+        # Fallback: transformers pipeline (kept for test/CI envs)
+        if _hf_pipeline is not None:
+            logger.info(
+                "faster-whisper unavailable — falling back to transformers "
+                "pipeline for model '%s'", _WHISPER_MODEL,
+            )
+            model_id = (
+                _WHISPER_MODEL
+                if "/" in _WHISPER_MODEL
+                else f"openai/whisper-{_WHISPER_MODEL.split('.')[0]}"
+            )
+            VoicePipeline._whisper_instance = _hf_pipeline(
                 "automatic-speech-recognition",
-                model=_WHISPER_MODEL,
+                model=model_id,
                 device="cpu",
             )
-        return VoicePipeline._whisper_instance
+            VoicePipeline._whisper_runtime = "transformers"
+            return VoicePipeline._whisper_instance
+
+        raise RuntimeError(
+            "Neither faster-whisper nor transformers is installed. "
+            "Run `pip install faster-whisper`."
+        )
 
     async def transcribe(self, audio_bytes: bytes) -> str:
         """Convert audio bytes to text via Whisper. Returns '' on failure."""
@@ -82,14 +129,24 @@ class VoicePipeline:
                 tmp_path = tmp.name
 
             whisper = self._get_whisper()
+            runtime = VoicePipeline._whisper_runtime
+
+            if runtime == "faster-whisper":
+                # Returns (segments, info); segments is an iterator of Segment
+                # objects with a .text attribute. vad_filter=True drops silence
+                # padding automatically — noticeable win on longer clips.
+                segments, _info = whisper.transcribe(
+                    tmp_path, vad_filter=True, beam_size=1,
+                )
+                text = " ".join(seg.text.strip() for seg in segments)
+                return text.strip()
+
+            # transformers fallback
             result = whisper(tmp_path)
-            text: str = result.get("text", "") if isinstance(result, dict) else ""
+            text = result.get("text", "") if isinstance(result, dict) else ""
             return text.strip()
 
         except Exception as exc:
-            # Log with exc_info so the full stack trace makes it into PM2
-            # logs — otherwise we get '(silent — skipping)' on the daemon
-            # with no way to see what actually broke.
             logger.warning(
                 "Whisper transcription failed (non-fatal): %s", exc,
                 exc_info=True,

@@ -151,9 +151,13 @@ class QdrantService:
           payload : dict   — the metadata stored at upsert time
         """
         client = self._require_client()
-        hits = await client.search(
+        # qdrant-client 1.10+ replaced `.search()` with `.query_points()`
+        # which returns a QueryResponse object exposing `.points`. Older
+        # `.search()` is gone in the 1.16+ SDK shipped here.
+        resp = await client.query_points(
             collection_name=collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
         )
+        hits = getattr(resp, "points", resp)
         return [{"score": hit.score, "payload": hit.payload} for hit in hits]

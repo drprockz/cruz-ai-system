@@ -73,8 +73,19 @@ class SemanticMemoryService:
         Return the top-`limit` most semantically similar past exchanges.
 
         Returns a list of {role, content} dicts ready to prepend to
-        Claude's messages array.
+        Claude's messages array. Returns [] when the collection doesn't
+        exist yet (first-ever request on a fresh install) — we create
+        it lazily on the first store() instead of here so searches never
+        error on an empty knowledge base.
         """
+        # Ensure the collection exists so a fresh install doesn't 404.
+        # Cheap no-op when it's already there.
+        try:
+            await self._qdrant.ensure_collection(self.COLLECTION, self.VECTOR_SIZE)
+        except Exception as exc:
+            logger.warning("ensure_collection failed (non-fatal): %s", exc)
+            return []
+
         query_vector = self._embedding.encode(query)
         hits = await self._qdrant.search(
             collection=self.COLLECTION,

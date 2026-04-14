@@ -219,15 +219,29 @@ async def health_check() -> JSONResponse:
         results["claude_api"] = f"error: {exc}"
 
     # ── Overall status ────────────────────────────────────────────────────
-    critical = [results["postgresql"], results["redis"], results["claude_api"]]
+    # Only gate on the LLM backend that's actually in use. If the operator
+    # has selected LLM_BACKEND=ollama, a dead Claude API shouldn't flip
+    # the system to degraded — it's intentionally not being called.
+    llm_backend = os.environ.get("LLM_BACKEND", "anthropic").strip().lower()
+    results["llm_backend"] = llm_backend
+
+    critical = [results["postgresql"], results["redis"]]
+    if llm_backend == "anthropic":
+        critical.append(results["claude_api"])
+    # gemini backend does not have a dedicated /health probe yet — it's
+    # exercised via the first real call. ollama's reachability is gated
+    # below on the Ollama service check, which already runs.
+
     services_ok = all(
         v in ("connected", "reachable") for v in critical
     ) and results["ollama"]["status"] == "reachable"
+
+    # Model-availability check only matters for Ollama-backed paths.
+    # Every agent path ultimately uses Ollama either as primary (most
+    # specialists) or as the LLMRouter backend when LLM_BACKEND=ollama.
     models_ok = not results["ollama"].get("missing")
 
     results["status"] = "healthy" if (services_ok and models_ok) else "degraded"
-    # Which LLM backend is active for CRUZ/FORGE/SENTINEL/GENERAL
-    results["llm_backend"] = os.environ.get("LLM_BACKEND", "anthropic").strip().lower()
     results["version"] = "0.1.0"
 
     return JSONResponse(status_code=200, content=results)

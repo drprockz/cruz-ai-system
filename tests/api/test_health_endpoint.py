@@ -206,7 +206,9 @@ class TestHealthOverallStatus:
         assert resp.json()["status"] == "degraded"
 
     def test_status_is_degraded_when_claude_is_down(self):
-        with patch("main.get_db_service", return_value=_healthy_db()), \
+        """Claude API down → degraded, but only when LLM_BACKEND=anthropic."""
+        with patch.dict(os.environ, {"LLM_BACKEND": "anthropic"}, clear=False), \
+             patch("main.get_db_service", return_value=_healthy_db()), \
              patch("main.aioredis.from_url", return_value=_healthy_redis()), \
              patch("main.OllamaService", return_value=_healthy_ollama()), \
              patch("main.anthropic.AsyncAnthropic", return_value=_unhealthy_claude()):
@@ -438,3 +440,33 @@ class TestHealthOllamaRequiredModels:
              patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
             resp = TestClient(app).get("/health")
         assert resp.json()["ollama"]["missing"] == ["qwen2.5-coder:14b"]
+
+    def test_claude_down_does_not_degrade_when_backend_is_ollama(self):
+        """
+        Regression: /health used to report 'degraded' whenever Claude API
+        was unreachable, even if the operator had switched LLM_BACKEND to
+        ollama. The claude_api probe is now only gated when backend=anthropic.
+        """
+        with patch.dict(os.environ, {"LLM_BACKEND": "ollama"}, clear=False), \
+             patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_unhealthy_claude()):
+            resp = TestClient(app).get("/health")
+        body = resp.json()
+        assert body["llm_backend"] == "ollama"
+        assert body["status"] == "healthy", (
+            f"Backend=ollama + dead Claude API should stay healthy. "
+            f"Got: {body}"
+        )
+
+    def test_claude_down_still_degrades_when_backend_is_anthropic(self):
+        """Opposite direction: when backend=anthropic, Claude API being
+        down must still degrade status."""
+        with patch.dict(os.environ, {"LLM_BACKEND": "anthropic"}, clear=False), \
+             patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_unhealthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["status"] == "degraded"

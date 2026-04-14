@@ -39,11 +39,15 @@ def _make_qdrant_client() -> MagicMock:
     # upsert
     client.upsert = AsyncMock(return_value=MagicMock(status="completed"))
 
-    # search — returns list of ScoredPoint-like objects
+    # query_points — qdrant-client >=1.10 returns a QueryResponse with .points
+    # (the old .search() method was removed). Each point in .points is a
+    # ScoredPoint-like object with .score + .payload.
     hit = MagicMock()
     hit.score = 0.92
     hit.payload = {"role": "user", "content": "My name is Darshan", "conversation_id": "conv-1"}
-    client.search = AsyncMock(return_value=[hit])
+    query_resp = MagicMock()
+    query_resp.points = [hit]
+    client.query_points = AsyncMock(return_value=query_resp)
 
     # health check
     client.get_collections = AsyncMock(return_value=MagicMock(collections=[]))
@@ -285,13 +289,15 @@ class TestQdrantServiceSearch:
 
         await svc.search("memories", [0.1] * 384, limit=7)
 
-        call_args = str(svc.client.search.call_args)
+        call_args = str(svc.client.query_points.call_args)
         assert "7" in call_args
 
     async def test_search_returns_empty_list_on_no_results(self):
         svc = QdrantService()
         svc.client = _make_qdrant_client()
-        svc.client.search = AsyncMock(return_value=[])
+        empty_resp = MagicMock()
+        empty_resp.points = []
+        svc.client.query_points = AsyncMock(return_value=empty_resp)
 
         results = await svc.search("memories", [0.0] * 384, limit=10)
 

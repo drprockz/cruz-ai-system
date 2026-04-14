@@ -108,9 +108,9 @@
 |---|---|---|
 | 6.1 | PM2 config (`ecosystem.config.js`) — API + ARQ worker + Ollama, auto-restart on reboot | ✅ R1 |
 | 6.2 | Monitoring stack — Uptime Kuma + Grafana Loki + Sentry + Telegram alerts | ⏭️ ops-side (see readiness checklist) |
-| 6.3 | Performance validation — latency targets, 10 concurrent requests, P95 DB queries | ⏭️ covered by 6.6 scenarios |
+| 6.3 | Performance validation — latency targets, 10 concurrent requests, P95 DB queries | ✅ Session B (2026-04-14) |
 | 6.4 | Cloudflare Tunnel — `cruz.simpleinc.cloud`, webhooks from GitHub/Vercel/Google Calendar | ⏭️ ops-side |
-| 6.5 | Backup automation — pg_dump + Redis + Qdrant → Google Drive via ARQ cron | ⏭️ ops-side |
+| 6.5 | Backup automation — pg_dump + Redis + Qdrant → Google Drive via ARQ cron | ✅ Session B (2026-04-14) |
 | 6.6 | Load testing + final validation — 4 production scenarios, 72-hour uptime test | ✅ harness (Session D 2026-04-14) |
 
 **Session D (2026-04-14) deliverables:**
@@ -122,10 +122,16 @@
 - `docs/production/readiness_checklist.md` — 12 programmatic gates before `ENVIRONMENT=production`
 - `tests/scripts/test_check_stability.py` — 5 passing unit tests + locust import smoke test
 
-6.2 / 6.4 / 6.5 remain ops-side (installing Uptime Kuma, wiring Cloudflare Tunnel,
-configuring Google Drive backups). The readiness checklist covers each as a
-verification gate, so the **code side of Phase 6 is done**; only keystrokes
-on the host remain.
+**Session B (2026-04-14) deliverables:**
+- 6.3 — `scripts/perf/bench_command.py` + `bench_db.py` + `bench_concurrent.py`,
+  `docs/perf/baseline.md` template, 14 unit tests with external I/O mocked.
+- 6.5 — `services/backup.py` (pg_dump / redis-cli --rdb / qdrant tar.gz /
+  Google Drive upload), `workers/tasks/backup_tasks.py`, cron(run_backup, hour=4),
+  SETUP.md docs for service-account + env vars, 10 new unit tests.
+
+6.2 / 6.4 remain ops-side (installing Uptime Kuma, wiring Cloudflare Tunnel).
+The readiness checklist covers each as a verification gate, so the **code side
+of Phase 6 is done**; only keystrokes on the host remain.
 
 ## What's next
 

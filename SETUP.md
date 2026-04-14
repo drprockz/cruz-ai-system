@@ -309,3 +309,46 @@ http://100.x.x.x:3000/health
 cloudflared tunnel run --url http://localhost:3000 cruz
 # CRUZ available at https://cruz.simpleinc.cloud
 ```
+
+---
+
+## Backup automation (Phase 6.5)
+
+CRUZ runs a **daily 04:00 backup** via the ARQ worker (see `workers/tasks/backup_tasks.py`).
+It snapshots Postgres (pg_dump -Fc), Redis (RDB), and Qdrant (tar.gz of
+`qdrant_storage/`), then uploads each file to Google Drive.
+
+Required env vars (in `.env`):
+
+```bash
+# Folder inside your Drive where snapshots land
+GOOGLE_DRIVE_FOLDER_ID=0AxxxxxxxxxxxxxxxxxX
+
+# Path to a Google service-account JSON key with drive.file scope
+GOOGLE_APPLICATION_CREDENTIALS=/Users/drprockz/.config/cruz/drive-sa.json
+
+# Optional — defaults are sensible
+QDRANT_STORAGE_DIR=./qdrant_storage
+```
+
+**Create the service account:**
+1. Google Cloud Console → IAM → Service Accounts → Create
+2. Grant it no project roles (we only need Drive scope).
+3. Keys → Add key → JSON → save to the path in `GOOGLE_APPLICATION_CREDENTIALS`.
+4. In Drive, share the destination folder with the service account's email
+   (Editor permission).
+
+**Test a one-off run:**
+```bash
+source venv/bin/activate
+python -c "import asyncio; from workers.tasks.backup_tasks import run_backup; \
+           print(asyncio.run(run_backup({})))"
+```
+
+**Verify cron is registered:**
+```bash
+arq workers.arq_worker.WorkerSettings --check
+```
+
+Partial failures are tolerated — if (e.g.) redis-cli is unavailable, the
+other two snapshots still upload and the failure is logged.

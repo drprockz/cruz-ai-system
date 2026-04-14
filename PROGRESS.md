@@ -153,7 +153,7 @@ crashes before responding to any command** because:
 |---|---|---|
 | R7 | ~~ECHO drafts emails, never sends~~ | ✅ 2026-04-14 — `services/email.py` (SendGrid); `context={"send":True}` sends after draft. `context["to"]` overrides draft recipient. |
 | R8 | ~~REACH drafts outreach, never sends~~ | ✅ 2026-04-14 — same EmailService; `context={"send":True}` sends each lead; per-lead sent/failed tracking; partial failure non-fatal |
-| R9 | SENTINEL reviews PRs, never posts GitHub inline comments | Reviews die in memory |
+| R9 | ~~SENTINEL never posts GitHub inline comments~~ | ✅ 2026-04-14 — `services/github.py` + `context={"send":True}` posts review via `/pulls/:n/reviews` with inline comments, severity prefixed |
 | R10 | MARK generates docs, never publishes to GitHub/Notion | Output not persisted anywhere |
 | R11 | Notion integration missing in CATCH, MARK, RAW, PULSE | 4 agents claim it, 0 implement it |
 | R12 | PM supports Plane.so only, not Linear or JIRA | CLAUDE.md says Linear/JIRA |
@@ -188,6 +188,7 @@ crashes before responding to any command** because:
 Tackle in client-value order:
 1. ✅ **R7** ECHO send email (SendGrid) — done 2026-04-14
 2. ✅ **R8** REACH send outreach (SendGrid, per-lead) — done 2026-04-14
+3. ✅ **R9** SENTINEL post GitHub review comments — done 2026-04-14
 3. **R9** SENTINEL post GitHub inline comments — completes PR review loop
 4. **R10** MARK publish to GitHub/Notion — closes documentation loop
 5. **R11** Shared Notion service (`services/notion.py`) — used by R7, R10, CATCH, RAW, PULSE

@@ -483,3 +483,164 @@ class TestReviewParsing:
     def test_returns_none_on_empty_string(self):
         from agents.sentinel.sentinel_agent import _parse_review
         assert _parse_review("") is None
+
+
+# ─────────────────────────────────────────────
+# R9 — Send mode (context["send"]=True → post to GitHub)
+# ─────────────────────────────────────────────
+
+def _make_send_input(
+    repo: str = "drprockz/ama-website",
+    pr_number: int = 42,
+) -> AgentInput:
+    return {
+        "task": f"Review PR #{pr_number} in {repo}",
+        "context": {"repo": repo, "pr_number": pr_number, "send": True},
+        "trace_id": "trace-sentinel-send",
+        "conversation_id": "conv-sentinel-send",
+    }
+
+
+def _mock_github_service(result=None, raises=None):
+    svc = MagicMock()
+    if raises is not None:
+        svc.post_pr_review = AsyncMock(side_effect=raises)
+    else:
+        svc.post_pr_review = AsyncMock(
+            return_value=result or {"posted": True, "review_id": 777}
+        )
+    return svc
+
+
+@pytest.mark.asyncio
+class TestSentinelSendMode:
+    async def test_send_true_posts_review_to_github(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service()
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            await SentinelAgent().process(_make_send_input())
+
+        gh_svc.post_pr_review.assert_called_once()
+
+    async def test_send_true_splits_repo_into_owner_and_name(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service()
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            await SentinelAgent().process(
+                _make_send_input(repo="drprockz/ama", pr_number=7)
+            )
+
+        kwargs = gh_svc.post_pr_review.call_args.kwargs
+        assert kwargs["owner"] == "drprockz"
+        assert kwargs["repo"] == "ama"
+        assert kwargs["pr_number"] == 7
+
+    async def test_send_true_maps_issues_to_github_comments(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service()
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            await SentinelAgent().process(_make_send_input())
+
+        comments = gh_svc.post_pr_review.call_args.kwargs["comments"]
+        # _critical_review has 2 issues — both should be mapped
+        assert len(comments) == 2
+        assert comments[0]["path"] == "src/api/auth.js"
+        assert comments[0]["line"] == 84
+        assert "SQL" in comments[0]["body"] or "injection" in comments[0]["body"].lower()
+
+    async def test_send_true_returns_requires_approval_false(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service()
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            result = await SentinelAgent().process(_make_send_input())
+
+        assert result["requires_approval"] is False
+
+    async def test_send_true_result_includes_posted_and_review_id(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service(
+            result={"posted": True, "review_id": 42424}
+        )
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            result = await SentinelAgent().process(_make_send_input())
+
+        assert result["result"]["posted"] is True
+        assert result["result"]["review_id"] == 42424
+
+    async def test_github_post_failure_returns_success_false(self):
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service(raises=RuntimeError("GitHub 401"))
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            result = await SentinelAgent().process(_make_send_input())
+
+        assert result["success"] is False
+        assert "GitHub" in (result["error"] or "")
+        assert result["requires_approval"] is False
+
+    async def test_send_false_is_default_unchanged(self):
+        """Without context.send, SENTINEL still returns requires_approval=True."""
+        from agents.sentinel.sentinel_agent import SentinelAgent
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService") as gh_cls, \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _critical_review())
+            result = await SentinelAgent().process(_make_input())
+
+        assert result["requires_approval"] is True
+        gh_cls.assert_not_called()
+
+    async def test_send_with_no_issues_still_posts_summary(self):
+        """Clean review → post summary body with no inline comments."""
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        gh_svc = _mock_github_service()
+
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as httpx_cls, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as claude_cls, \
+             patch("agents.sentinel.sentinel_agent.GitHubService", return_value=gh_svc), \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(httpx_cls)
+            _setup_claude_mock(claude_cls, _clean_review())
+            await SentinelAgent().process(_make_send_input())
+
+        kwargs = gh_svc.post_pr_review.call_args.kwargs
+        assert kwargs["comments"] == []
+        assert len(kwargs["body"]) > 0

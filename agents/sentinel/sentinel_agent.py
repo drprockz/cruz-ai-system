@@ -37,6 +37,7 @@ import httpx
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.github import GitHubService
 
 logger = logging.getLogger("cruz.agents.SENTINEL")
 
@@ -170,6 +171,84 @@ class SentinelAgent(BaseAgent):
             "high_count": high_count,
         }
 
+        # ── Send mode: context["send"]=True → post review to GitHub ──────
+        if input["context"].get("send") is True:
+            owner, _, repo_name = repo.partition("/")
+            comments = [
+                {
+                    "path": issue["file"],
+                    "line": issue["line"],
+                    "body": f"**[{issue['severity'].upper()}]** {issue['comment']}",
+                }
+                for issue in issues
+                if issue.get("file") and issue.get("line")
+            ]
+            try:
+                post_result = await GitHubService().post_pr_review(
+                    owner=owner,
+                    repo=repo_name,
+                    pr_number=pr_number,
+                    body=review.get("summary", ""),
+                    comments=comments,
+                )
+            except Exception as post_exc:
+                err = str(post_exc)
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"repo": repo, "pr_number": pr_number, "mode": "send"},
+                        output_data={"error": err, "total_issues": total_issues},
+                        tokens_used=tokens_used,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+                return AgentOutput(
+                    success=False,
+                    result={**result, "posted": False},
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=tokens_used,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+
+            result["posted"] = post_result.get("posted", False)
+            result["review_id"] = post_result.get("review_id")
+
+            duration = int((time.monotonic() - start) * 1000)
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success",
+                    input_data={"repo": repo, "pr_number": pr_number, "mode": "send"},
+                    output_data={
+                        "total_issues": total_issues,
+                        "review_id": result["review_id"],
+                    },
+                    tokens_used=tokens_used,
+                    duration_ms=duration,
+                )
+            except Exception:
+                pass
+
+            return AgentOutput(
+                success=True,
+                result=result,
+                agent=self.name,
+                duration_ms=duration,
+                tokens_used=tokens_used,
+                error=None,
+                requires_approval=False,
+                approval_prompt=None,
+            )
+
+        # ── Draft-only (default): approval gate ──────────────────────────
         approval_prompt = (
             f"Post {total_issues} review comment{'s' if total_issues != 1 else ''} "
             f"on PR #{pr_number} in {repo}?\n"

@@ -254,8 +254,17 @@ class WakeWordDetector:
                 "openwakeword package not installed. "
                 "Run `pip install openwakeword`."
             )
-        # Pretrained models live inside the openwakeword package.
-        # Default: 'hey_jarvis' — swap later for custom CRUZ model.
+        # The pretrained models aren't shipped inside the pip package;
+        # openwakeword provides a helper that fetches them on demand.
+        # Download-if-missing is cheap (local check) so always call it.
+        try:
+            from openwakeword.utils import download_models  # type: ignore
+            download_models()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "openwakeword model download failed (continuing — "
+                "will fail loudly on Model() if truly missing): %s", exc,
+            )
         self._oww_model = openwakeword.Model(
             wakeword_models=[self._keyword],
             inference_framework="onnx",

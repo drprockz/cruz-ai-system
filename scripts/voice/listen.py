@@ -249,7 +249,9 @@ async def _wait_for_wake(detector) -> None:
     try:
         while True:
             audio, _ = stream.read(frame_length)
-            frame = audio.flatten().tolist()
+            # Keep as a 1-D numpy int16 array — WakeWordDetector handles
+            # both numpy (openwakeword) and list (picovoice) internally.
+            frame = audio.flatten()
             if detector.detect(frame):
                 return
             # Yield to the event loop so Ctrl-C works and other tasks run

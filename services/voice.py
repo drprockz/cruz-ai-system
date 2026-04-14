@@ -301,16 +301,30 @@ class WakeWordDetector:
         Process one audio frame. Returns True iff the wake word triggered.
 
         Frame size depends on backend:
-          - openwakeword: 1280 int16 samples @ 16kHz (80ms chunks)
-          - picovoice:    512  int16 samples @ 16kHz
+          - openwakeword: 1280 int16 samples @ 16kHz (80ms chunks) — numpy array
+          - picovoice:    512  int16 samples @ 16kHz — list[int]
+
+        Callers can pass either a numpy array or a list; we coerce to
+        whatever the underlying backend expects.
         """
         if self._backend == "openwakeword":
-            scores = self._oww_model.predict(frame)
+            # openwakeword rejects Python lists; needs numpy
+            try:
+                import numpy as np
+            except ImportError:  # pragma: no cover
+                raise RuntimeError(
+                    "numpy is required for the openwakeword backend. "
+                    "Run `pip install numpy`."
+                )
+            arr = frame if hasattr(frame, "dtype") else np.asarray(frame, dtype=np.int16)
+            scores = self._oww_model.predict(arr)
             if not isinstance(scores, dict):
                 return False
             best = max(scores.values(), default=0.0)
             return best >= self._threshold
-        # picovoice
+        # picovoice wants a list of Python ints
+        if hasattr(frame, "tolist"):
+            frame = frame.tolist()
         idx = self._pv_handle.process(frame)
         return isinstance(idx, int) and idx >= 0
 

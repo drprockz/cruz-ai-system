@@ -441,3 +441,166 @@ class TestTitanLogging:
                 mock_log.side_effect = Exception("DB dead")
                 result = await agent.process(_make_input(target="vercel"))
         assert result["success"] is True
+
+
+# ─────────────────────────────────────────────
+# R14 — Auto-rollback on failed deploy
+# ─────────────────────────────────────────────
+
+from agents.titan.titan_agent import TitanAgent  # noqa: E402
+
+
+def _vercel_failing_client(rollback_ok: bool = True):
+    """AsyncClient whose first POST raises, second (rollback) succeeds iff rollback_ok."""
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+
+    deploy_exc = Exception("Vercel API 500")
+    ok_resp = MagicMock()
+    ok_resp.json.return_value = {"id": "dpl_rollback"}
+    ok_resp.raise_for_status = MagicMock()
+    if rollback_ok:
+        client.post = AsyncMock(side_effect=[deploy_exc, ok_resp])
+    else:
+        client.post = AsyncMock(side_effect=[deploy_exc, Exception("Rollback 500")])
+    return client
+
+
+@pytest.mark.asyncio
+class TestTitanAutoRollback:
+    async def test_vercel_deploy_failure_triggers_rollback_when_prev_id_given(self):
+        """Failed deploy + previous_deployment_id + auto_rollback default → rollback attempted."""
+        agent = TitanAgent()
+        client = _vercel_failing_client(rollback_ok=True)
+        with patch("agents.titan.titan_agent.httpx.AsyncClient", return_value=client), \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(
+                target="vercel",
+                extra_context={"previous_deployment_id": "dpl_prev_good"},
+            ))
+        # The POST was called twice: the failed deploy + the rollback
+        assert client.post.call_count == 2
+        # Second call was a promote/rollback URL with the previous id
+        second_url = client.post.call_args_list[1][0][0]
+        assert "dpl_prev_good" in second_url
+        assert result["result"]["rolled_back"] is True
+        assert result["success"] is False  # deploy failed — success reflects deploy, not rollback
+
+    async def test_vercel_deploy_failure_skips_rollback_without_prev_id(self):
+        """No previous_deployment_id → rollback skipped with reason, no extra POST."""
+        agent = TitanAgent()
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(side_effect=Exception("Vercel API 500"))
+        with patch("agents.titan.titan_agent.httpx.AsyncClient", return_value=client), \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(target="vercel"))
+        # Only the failed deploy POST — no rollback call
+        assert client.post.call_count == 1
+        assert result["result"]["rolled_back"] is False
+        assert "previous_deployment_id" in (result["result"].get("rollback_skipped_reason") or "")
+
+    async def test_vercel_deploy_failure_rollback_failure_reported(self):
+        agent = TitanAgent()
+        client = _vercel_failing_client(rollback_ok=False)
+        with patch("agents.titan.titan_agent.httpx.AsyncClient", return_value=client), \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(
+                target="vercel",
+                extra_context={"previous_deployment_id": "dpl_prev"},
+            ))
+        assert result["result"]["rolled_back"] is False
+        assert "Rollback" in (result["result"].get("rollback_error") or "")
+
+    async def test_auto_rollback_false_skips_rollback_even_on_failure(self):
+        agent = TitanAgent()
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(side_effect=Exception("Vercel API 500"))
+        with patch("agents.titan.titan_agent.httpx.AsyncClient", return_value=client), \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(
+                target="vercel",
+                extra_context={
+                    "previous_deployment_id": "dpl_prev",
+                    "auto_rollback": False,
+                },
+            ))
+        assert client.post.call_count == 1  # no rollback attempted
+        assert result["result"]["rolled_back"] is False
+        assert "disabled" in (result["result"].get("rollback_skipped_reason") or "").lower()
+
+    async def test_successful_deploy_does_not_attempt_rollback(self):
+        """Happy path — no rollback logic runs. Result has rolled_back=False as a marker."""
+        agent = TitanAgent()
+        with patch("agents.titan.titan_agent.httpx.AsyncClient") as mc, \
+             patch("agents.titan.titan_agent.get_db_service"):
+            _setup_vercel_mock(mc)
+            result = await agent.process(_make_input(target="vercel"))
+        # Successful deploy keeps existing behavior
+        assert result["success"] is True
+        assert result["result"]["rolled_back"] is False
+        assert result["requires_approval"] is True
+
+    async def test_ssh_deploy_failure_runs_rollback_command(self):
+        agent = TitanAgent()
+        # First subprocess = failed deploy, second = successful rollback
+        failed_proc = _mock_process(returncode=1, stdout=b"", stderr=b"oops")
+        rollback_proc = _mock_process(returncode=0, stdout=b"rolled back", stderr=b"")
+        with patch("agents.titan.titan_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(side_effect=[failed_proc, rollback_proc])) as mock_exec, \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(
+                target="ssh",
+                extra_context={"ssh_rollback_command": "cd /app && git revert --no-edit HEAD"},
+            ))
+        assert mock_exec.call_count == 2
+        assert result["result"]["rolled_back"] is True
+        assert result["success"] is False  # deploy failed
+
+    async def test_ssh_deploy_failure_skips_rollback_without_command(self):
+        agent = TitanAgent()
+        failed_proc = _mock_process(returncode=1, stdout=b"", stderr=b"oops")
+        with patch("agents.titan.titan_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=failed_proc)) as mock_exec, \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(target="ssh"))  # no rollback_command
+        # Only the failed deploy subprocess
+        assert mock_exec.call_count == 1
+        assert result["result"]["rolled_back"] is False
+        assert "ssh_rollback_command" in (result["result"].get("rollback_skipped_reason") or "")
+
+    async def test_railway_deploy_failure_redeploys_previous(self):
+        """Railway rollback re-runs serviceInstanceRedeploy with rollback_service_id."""
+        agent = TitanAgent()
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        fail_resp = MagicMock()
+        fail_resp.json.return_value = {"data": {"serviceInstanceRedeploy": False}}
+        fail_resp.raise_for_status = MagicMock()
+
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"data": {"serviceInstanceRedeploy": True}}
+        ok_resp.raise_for_status = MagicMock()
+
+        client.post = AsyncMock(side_effect=[fail_resp, ok_resp])
+
+        with patch("agents.titan.titan_agent.httpx.AsyncClient", return_value=client), \
+             patch("agents.titan.titan_agent.get_db_service"):
+            result = await agent.process(_make_input(
+                target="railway",
+                extra_context={
+                    "rollback_service_id": "svc_prev",
+                    "rollback_environment_id": "env_prev",
+                },
+            ))
+        assert client.post.call_count == 2
+        # Second payload uses the rollback service + environment ids
+        second_body = str(client.post.call_args_list[1])
+        assert "svc_prev" in second_body
+        assert result["result"]["rolled_back"] is True

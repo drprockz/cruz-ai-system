@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 14, 2026
-**Tests passing:** 883 / 883 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
+**Tests passing:** 1021 / 1021 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -102,16 +102,29 @@
 
 ---
 
-## Phase 6 — Production Hardening ⚠️ code-side done (2/6); ops-side pending
+## Phase 6 — Production Hardening ✅ code-side done (6/6); Mac-Mini install still needed
 
 | Task | Description | Status |
 |---|---|---|
 | 6.1 | PM2 config (`ecosystem.config.js`) — API + ARQ worker + Ollama, auto-restart on reboot | ✅ R1 |
-| 6.2 | Monitoring stack — Uptime Kuma + Grafana Loki + Sentry + Telegram alerts | ⏭️ ops-side (see readiness checklist) |
+| 6.2 | Monitoring stack — Uptime Kuma + Grafana Loki + Sentry + Telegram alerts | ✅ Session C (2026-04-14) |
 | 6.3 | Performance validation — latency targets, 10 concurrent requests, P95 DB queries | ✅ Session B (2026-04-14) |
-| 6.4 | Cloudflare Tunnel — `cruz.simpleinc.cloud`, webhooks from GitHub/Vercel/Google Calendar | ⏭️ ops-side |
+| 6.4 | Cloudflare Tunnel — `cruz.simpleinc.cloud`, webhooks from GitHub/Vercel/Google Calendar | ✅ Session C (2026-04-14) |
 | 6.5 | Backup automation — pg_dump + Redis + Qdrant → Google Drive via ARQ cron | ✅ Session B (2026-04-14) |
 | 6.6 | Load testing + final validation — 4 production scenarios, 72-hour uptime test | ✅ harness (Session D 2026-04-14) |
+
+**Session C (2026-04-14) deliverables:**
+- 6.2 — `services/alerts.py` AlertService (Telegram+Sentry) + LokiHandler;
+  wired into CruzAgent (unhandled exc), TITAN (deploy failure), ARQ
+  after_job_end; lifespan inits Sentry + Loki when env vars set; docker
+  compose `monitoring` profile brings up Uptime Kuma + Loki + Grafana;
+  SETUP.md monitoring bring-up + probe list; **20 new tests**.
+- 6.4 — `POST /webhooks/github` (HMAC-SHA256), `/webhooks/vercel`
+  (HMAC-SHA1), `/webhooks/google-calendar` (X-Goog-Channel-Token);
+  each verifies signature → enqueues ARQ job → returns 200; 401 on bad
+  sig; `workers/tasks/webhook_tasks.py` + WorkerSettings registration;
+  `cloudflared/config.yml` template + `docs/cloudflare/setup.md`;
+  **11 new tests**.
 
 **Session D (2026-04-14) deliverables:**
 - `scripts/load/locustfile.py` — 4 scenarios: morning_rush, agent_mix, sse_streaming, overnight
@@ -129,9 +142,9 @@
   Google Drive upload), `workers/tasks/backup_tasks.py`, cron(run_backup, hour=4),
   SETUP.md docs for service-account + env vars, 10 new unit tests.
 
-6.2 / 6.4 remain ops-side (installing Uptime Kuma, wiring Cloudflare Tunnel).
-The readiness checklist covers each as a verification gate, so the **code side
-of Phase 6 is done**; only keystrokes on the host remain.
+6.2 and 6.4 code now landed in Session C. Installation on the Mac Mini
+(running `docker compose --profile monitoring up -d` + `cloudflared service
+install`) is the only remaining step; the readiness checklist covers it.
 
 ## What's next
 

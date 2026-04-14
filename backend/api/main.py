@@ -3,6 +3,8 @@ CRUZ AI System - FastAPI Application
 Main entry point for the CRUZ API server.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -13,8 +15,10 @@ from typing import Any, AsyncGenerator, Optional
 import anthropic
 import psycopg2
 import redis.asyncio as aioredis
+from arq import create_pool
+from arq.connections import RedisSettings
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -624,6 +628,72 @@ async def get_tasks(status: Optional[str] = None) -> JSONResponse:
         status_code=200,
         content=[dict(row) for row in rows],
     )
+
+
+# ─── Webhook endpoints (Phase 6.4 — Cloudflare Tunnel) ─────────────────────
+#
+# Each endpoint validates an HMAC signature (GitHub/Vercel) or a static token
+# (Google Calendar), enqueues a background ARQ task, and returns 200 fast so
+# the sender does not time out. Signature failure → 401.
+
+
+async def get_arq_pool():
+    """Create an ARQ Redis pool for enqueueing webhook tasks."""
+    return await create_pool(RedisSettings.from_dsn(REDIS_URL))
+
+
+def _verify_hmac(secret: str, body: bytes, header_value: str, algo: str) -> bool:
+    if not secret or not header_value:
+        return False
+    prefix = f"{algo}="
+    provided = header_value[len(prefix):] if header_value.startswith(prefix) else header_value
+    expected = hmac.new(secret.encode(), body, getattr(hashlib, algo)).hexdigest()
+    return hmac.compare_digest(expected, provided)
+
+
+@app.post("/webhooks/github")
+async def webhook_github(request: Request) -> JSONResponse:
+    body = await request.body()
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+    sig = request.headers.get("x-hub-signature-256", "")
+    if not _verify_hmac(secret, body, sig, "sha256"):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    try:
+        payload = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid json")
+    event = request.headers.get("x-github-event", "unknown")
+    pool = await get_arq_pool()
+    await pool.enqueue_job("process_github_webhook", event, payload)
+    return JSONResponse(status_code=200, content={"queued": True, "event": event})
+
+
+@app.post("/webhooks/vercel")
+async def webhook_vercel(request: Request) -> JSONResponse:
+    body = await request.body()
+    secret = os.environ.get("VERCEL_WEBHOOK_SECRET", "")
+    sig = request.headers.get("x-vercel-signature", "")
+    if not _verify_hmac(secret, body, sig, "sha1"):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    try:
+        payload = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid json")
+    pool = await get_arq_pool()
+    await pool.enqueue_job("process_vercel_webhook", payload)
+    return JSONResponse(status_code=200, content={"queued": True})
+
+
+@app.post("/webhooks/google-calendar")
+async def webhook_google_calendar(request: Request) -> JSONResponse:
+    expected = os.environ.get("GOOGLE_WEBHOOK_TOKEN", "")
+    provided = request.headers.get("x-goog-channel-token", "")
+    if not expected or not hmac.compare_digest(expected, provided):
+        raise HTTPException(status_code=401, detail="invalid token")
+    headers = {k: v for k, v in request.headers.items() if k.lower().startswith("x-goog-")}
+    pool = await get_arq_pool()
+    await pool.enqueue_job("process_google_calendar_webhook", headers)
+    return JSONResponse(status_code=200, content={"queued": True})
 
 
 if __name__ == "__main__":

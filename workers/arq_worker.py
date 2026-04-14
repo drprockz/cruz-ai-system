@@ -23,6 +23,11 @@ from workers.tasks.backup_tasks import run_backup
 from workers.tasks.pulse_tasks import run_pulse
 from workers.tasks.raw_tasks import run_raw
 from workers.tasks.reach_tasks import run_reach
+from workers.tasks.webhook_tasks import (
+    process_github_webhook,
+    process_google_calendar_webhook,
+    process_vercel_webhook,
+)
 
 
 async def on_job_end(ctx: dict) -> None:
@@ -50,7 +55,12 @@ async def on_job_end(ctx: dict) -> None:
 class WorkerSettings:
     """ARQ WorkerSettings — defines scheduled cron jobs and Redis connection."""
 
-    functions = [run_pulse, run_raw, run_reach, run_backup]
+    functions = [
+        run_pulse, run_raw, run_reach, run_backup,
+        process_github_webhook,
+        process_vercel_webhook,
+        process_google_calendar_webhook,
+    ]
     after_job_end = on_job_end
 
     cron_jobs = [

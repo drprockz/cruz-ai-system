@@ -1,0 +1,38 @@
+# Cloudflare Tunnel config for CRUZ (cruz.simpleinc.cloud).
+#
+# Install on the Mac Mini:
+#   brew install cloudflared
+#   cloudflared tunnel login
+#   cloudflared tunnel create cruz
+#   cloudflared tunnel route dns cruz cruz.simpleinc.cloud
+#
+# Replace <TUNNEL_UUID> below with the id printed by `tunnel create`,
+# then move this file to ~/.cloudflared/config.yml. The credentials-file
+# path is what `tunnel create` writes to ~/.cloudflared/<UUID>.json.
+
+tunnel: <TUNNEL_UUID>
+credentials-file: /Users/darshan/.cloudflared/<TUNNEL_UUID>.json
+
+# Optional metrics (Uptime Kuma can probe this)
+metrics: 127.0.0.1:4040
+
+ingress:
+  # Primary host → FastAPI on localhost:3000
+  - hostname: cruz.simpleinc.cloud
+    service: http://localhost:3000
+    originRequest:
+      connectTimeout: 10s
+      # CRUZ /command streams SSE; keep the origin connection open long.
+      noTLSVerify: false
+      httpHostHeader: cruz.simpleinc.cloud
+
+  # Webhook subpaths share the same origin but keep tight timeouts — no
+  # long-polling here, just signature-verified POSTs that enqueue jobs.
+  - hostname: cruz.simpleinc.cloud
+    path: /webhooks/*
+    service: http://localhost:3000
+    originRequest:
+      connectTimeout: 5s
+
+  # Catch-all — required last rule.
+  - service: http_status:404

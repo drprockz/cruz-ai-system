@@ -140,7 +140,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response("def hello(): return 'world'"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input())
 
         assert result["success"] is True
@@ -150,7 +150,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response(code))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input())
 
         assert result["result"] == code
@@ -159,7 +159,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response("code"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input())
 
         assert result["agent"] == "FORGE"
@@ -168,7 +168,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response("code"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input())
 
         assert result["tokens_used"] == 500  # 200 + 300
@@ -177,7 +177,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response("code"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input())
 
         assert result["requires_approval"] is False
@@ -186,7 +186,7 @@ class TestForgeSimpleResponse:
         client = _make_claude_client(_make_text_response("code"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             await agent.process(_make_input())
 
         kwargs = client.messages.create.call_args[1]
@@ -213,7 +213,7 @@ class TestForgeReadFileTool:
             client = _make_claude_client(read_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("update the existing function"))
 
             assert result["success"] is True
@@ -234,7 +234,7 @@ class TestForgeReadFileTool:
             client = _make_claude_client(read_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 await agent.process(_make_input("update foo"))
 
             # Second call should include tool_result with file content
@@ -253,7 +253,7 @@ class TestForgeReadFileTool:
         client = _make_claude_client(read_resp, final_resp)
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input("read /nonexistent/path/file.py"))
 
         # Should NOT crash — error is fed back to Claude as tool_result
@@ -281,7 +281,7 @@ class TestForgeWriteFileTool:
             client = _make_claude_client(write_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("write hello world to hello.py"))
 
             assert result["success"] is True
@@ -300,7 +300,7 @@ class TestForgeWriteFileTool:
             client = _make_claude_client(write_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 await agent.process(_make_input("write x=1 to out.py"))
 
             second_messages = client.messages.create.call_args_list[1][1]["messages"]
@@ -320,7 +320,7 @@ class TestForgeWriteFileTool:
             client = _make_claude_client(write_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 await agent.process(_make_input("write to nested path"))
 
             assert Path(target).exists()
@@ -345,7 +345,7 @@ class TestForgeRunLinterTool:
             client = _make_claude_client(lint_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("lint the file"))
 
             second_messages = client.messages.create.call_args_list[1][1]["messages"]
@@ -371,7 +371,7 @@ class TestForgeRunLinterTool:
             client = _make_claude_client(lint_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("lint the bad file"))
 
             second_messages = client.messages.create.call_args_list[1][1]["messages"]
@@ -390,7 +390,7 @@ class TestForgeRunLinterTool:
         client = _make_claude_client(lint_resp, final_resp)
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input("lint missing file"))
 
         assert result["success"] is True  # agent handled it gracefully
@@ -417,7 +417,7 @@ class TestForgeAgenticLoop:
             client = _make_claude_client(write_resp, lint_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(
                     _make_input("write a greet function and lint it")
                 )
@@ -437,7 +437,7 @@ class TestForgeAgenticLoop:
         client2 = _make_claude_client(write_resp, final_resp)
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client2):
+        with patch("agents.forge.forge_agent.llm_chat", new=client2.messages.create):
             result = await agent.process(_make_input("write x=1"))
 
         # Both turns: (150+50) + (200+300) = 700
@@ -456,7 +456,7 @@ class TestForgeAgenticLoop:
         client.messages.create = AsyncMock(return_value=always_tool)
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input("infinite task"))
 
         # Must not hang. Result may be success=False or a partial result.
@@ -478,7 +478,7 @@ class TestForgeErrorHandling:
         )
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input("anything"))
 
         assert result["success"] is False
@@ -511,7 +511,7 @@ class TestForgeListDirectoryTool:
             client = _make_claude_client(list_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("list the directory"))
 
             assert result["success"] is True
@@ -528,7 +528,7 @@ class TestForgeListDirectoryTool:
         client = _make_claude_client(list_resp, final_resp)
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
             result = await agent.process(_make_input("list missing dir"))
 
         assert result["success"] is True
@@ -549,7 +549,7 @@ class TestForgeListDirectoryTool:
             client = _make_claude_client(list_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 await agent.process(_make_input("list the directory"))
 
             second_messages = client.messages.create.call_args_list[1][1]["messages"]
@@ -576,7 +576,7 @@ class TestForgeLinterJSTS:
             client = _make_claude_client(lint_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("lint the JS file"))
 
             assert result["success"] is True
@@ -600,7 +600,7 @@ class TestForgeLinterJSTS:
             client = _make_claude_client(lint_resp, final_resp)
             agent = ForgeAgent()
 
-            with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client):
+            with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
                 result = await agent.process(_make_input("lint the TS file"))
 
             assert result["success"] is True
@@ -618,7 +618,7 @@ class TestForgeAgentLogging:
         client = _make_claude_client(_make_text_response("def hello(): pass"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create), \
              patch("agents.forge.forge_agent.get_db_service") as mock_get_db, \
              patch.object(agent, "log", new=AsyncMock()) as mock_log:
             await agent.process(_make_input())
@@ -630,7 +630,7 @@ class TestForgeAgentLogging:
         client = _make_claude_client(_make_text_response("def hello(): pass"))
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create), \
              patch("agents.forge.forge_agent.get_db_service"), \
              patch.object(agent, "log", new=AsyncMock()) as mock_log:
             await agent.process(_make_input())
@@ -648,7 +648,7 @@ class TestForgeAgentLogging:
         )
         agent = ForgeAgent()
 
-        with patch("agents.forge.forge_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create), \
              patch("agents.forge.forge_agent.get_db_service"), \
              patch.object(agent, "log", new=AsyncMock()) as mock_log:
             result = await agent.process(_make_input())

@@ -107,7 +107,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "hi there",
                 "context": {},
@@ -123,7 +123,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "who are you?",
                 "context": {},
@@ -139,7 +139,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -155,7 +155,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -171,7 +171,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -187,7 +187,7 @@ class TestCruzAgentProcessSimpleResponse:
         client = self._make_claude_client(resp)
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "write me a function",
                 "context": {},
@@ -245,7 +245,7 @@ class TestCruzAgentToolUse:
         )
 
         agent = CruzAgent()
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch.object(agent, "_dispatch_tool", new=AsyncMock(return_value=mock_forge_result)):
                 inp: AgentInput = {
                     "task": "write a hello world function",
@@ -278,7 +278,7 @@ class TestCruzAgentToolUse:
         )
 
         agent = CruzAgent()
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch.object(agent, "_dispatch_tool", new=AsyncMock(return_value=mock_echo_result)):
                 inp: AgentInput = {
                     "task": "send the email to the client",
@@ -301,7 +301,7 @@ class TestCruzAgentErrorHandling:
         )
 
         agent = CruzAgent()
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},

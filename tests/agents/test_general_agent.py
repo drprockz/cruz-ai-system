@@ -47,7 +47,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("The weather is sunny.")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "What is the weather like?",
                 "context": {},
@@ -62,7 +62,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("Paris is the capital of France.")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "What is the capital of France?",
                 "context": {},
@@ -77,7 +77,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("answer")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -92,7 +92,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("answer")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -108,7 +108,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("answer")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "anything",
                 "context": {},
@@ -123,7 +123,7 @@ class TestGeneralAgentProcess:
         mock_client = self._make_mock_client("answer")
         agent = GeneralAgent()
 
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create):
             inp: AgentInput = {
                 "task": "Explain quantum computing",
                 "context": {},
@@ -147,7 +147,7 @@ class TestGeneralAgentProcess:
         )
 
         agent = GeneralAgent()
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client), \
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create), \
              patch("agents.general.general_agent.get_db_service"):
             inp: AgentInput = {
                 "task": "anything",
@@ -193,7 +193,7 @@ class TestGeneralAgentLogging:
             side_effect=_anthropic.APIConnectionError(request=MagicMock())
         )
         agent = GeneralAgent()
-        with patch("agents.general.general_agent.anthropic.AsyncAnthropic", return_value=mock_client), \
+        with patch("agents.general.general_agent.llm_chat", new=mock_client.messages.create), \
              patch("agents.general.general_agent.get_db_service"):
             with patch.object(agent, "log", new_callable=AsyncMock) as mock_log:
                 await agent.process({

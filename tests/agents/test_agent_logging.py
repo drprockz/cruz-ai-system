@@ -221,7 +221,7 @@ class TestCruzAgentLogging:
         mock_db = _make_db()
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service", return_value=mock_db), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -239,7 +239,7 @@ class TestCruzAgentLogging:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -262,7 +262,7 @@ class TestCruzAgentLogging:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -285,7 +285,7 @@ class TestCruzAgentLogging:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \
@@ -304,7 +304,7 @@ class TestCruzAgentLogging:
 
         agent = CruzAgent()
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client), \
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create), \
              patch("agents.cruz.cruz_agent.ConversationService", return_value=_make_conv_service()), \
              patch("agents.cruz.cruz_agent.get_db_service"), \
              patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_make_sem_service()), \

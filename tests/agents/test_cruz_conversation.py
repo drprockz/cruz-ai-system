@@ -66,7 +66,7 @@ class TestCruzLoadsHistory:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-persist-001")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(_make_input("conv-persist-001"))
@@ -87,7 +87,7 @@ class TestCruzLoadsHistory:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-persist-001")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(_make_input())
@@ -107,7 +107,7 @@ class TestCruzLoadsHistory:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="new-conv")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     result = await agent.process(_make_input("new-conv"))
@@ -128,7 +128,7 @@ class TestCruzSavesExchange:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-persist-001")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(_make_input())
@@ -144,7 +144,7 @@ class TestCruzSavesExchange:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-save-test")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(_make_input("conv-save-test"))
@@ -168,7 +168,7 @@ class TestCruzSavesExchange:
             "conversation_id": "conv-1",
         }
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(inp)
@@ -185,7 +185,7 @@ class TestCruzSavesExchange:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-1")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     await agent.process(_make_input())
@@ -209,7 +209,7 @@ class TestCruzSavesExchange:
         mock_conv_service.save_exchange = AsyncMock()
         mock_conv_service.get_or_create_conversation = AsyncMock(return_value="conv-1")
 
-        with patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=client):
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
             with patch("agents.cruz.cruz_agent.ConversationService", return_value=mock_conv_service):
                 with patch("agents.cruz.cruz_agent.get_db_service"):
                     result = await agent.process(_make_input())

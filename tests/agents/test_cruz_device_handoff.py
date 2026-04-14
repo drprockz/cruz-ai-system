@@ -85,7 +85,7 @@ class TestCruzDeviceSwitchInjection:
         handoff_svc.set_device = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),
@@ -116,7 +116,7 @@ class TestCruzDeviceSwitchInjection:
         handoff_svc.publish_switch = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),
@@ -143,7 +143,7 @@ class TestCruzDeviceSwitchInjection:
         handoff_svc.publish_switch = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),
@@ -176,7 +176,7 @@ class TestCruzNoSwitchFlow:
         handoff_svc.publish_switch = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),
@@ -202,7 +202,7 @@ class TestCruzNoSwitchFlow:
         handoff_svc.publish_switch = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),
@@ -229,7 +229,7 @@ class TestCruzNoSwitchFlow:
         handoff_svc.publish_switch = AsyncMock()
 
         with (
-            patch("agents.cruz.cruz_agent.anthropic.AsyncAnthropic", return_value=claude),
+            patch("agents.cruz.cruz_agent.llm_chat", new=claude.messages.create),
             patch("agents.cruz.cruz_agent.ConversationService", return_value=_mock_conv_service()),
             patch("agents.cruz.cruz_agent.SemanticMemoryService", return_value=_mock_sem_service()),
             patch("agents.cruz.cruz_agent.get_db_service", return_value=_mock_db()),

@@ -326,8 +326,11 @@ async def run_one(
             raise RuntimeError("wake-word mode requires a detector instance")
         print("🎧 Listening for wake word…")
         await _wait_for_wake(detector)
-        print("👂 Heard you — go ahead.")
-        wav_bytes = _record_until_silence()
+        print("👂 Heard you — go ahead (you have 6 seconds)")
+        # Fixed-duration recording — simpler and more reliable than VAD.
+        # User gets a guaranteed 6-second window to speak.
+        wav_bytes = _record_ptt(duration_ms=6000)
+        print(f"   captured {len(wav_bytes) / 1024:.1f} KB")
     elif mode == "push-to-talk":
         input("🎙️  Press Enter to talk… ")
         wav_bytes = _record_ptt()

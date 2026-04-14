@@ -374,12 +374,14 @@ async def run_one(
     else:
         raise ValueError(f"unknown mode '{mode}'")
 
+    print("   ⏳ transcribing…")
     text = await transcribe(host, wav_bytes)
     if not text:
-        print("(silent — skipping)")
+        print("   (silent — skipping)  ← check `pm2 logs cruz-api` if unexpected")
         return
     print(f"📝 Heard: {text}")
 
+    print("   ⏳ CRUZ thinking…")
     reply = await command(
         host=host, text=text,
         conversation_id=conversation_id, device=device,
@@ -389,6 +391,7 @@ async def run_one(
         return
     print(f"🤖 CRUZ: {reply}")
 
+    print("   🔊 speaking…")
     await synthesize_and_play(host=host, text=reply)
 
 

@@ -81,7 +81,13 @@ class VoicePipeline:
             return text.strip()
 
         except Exception as exc:
-            logger.warning("Whisper transcription failed (non-fatal): %s", exc)
+            # Log with exc_info so the full stack trace makes it into PM2
+            # logs — otherwise we get '(silent — skipping)' on the daemon
+            # with no way to see what actually broke.
+            logger.warning(
+                "Whisper transcription failed (non-fatal): %s", exc,
+                exc_info=True,
+            )
             return ""
 
         finally:

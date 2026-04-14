@@ -132,3 +132,55 @@ class TestRelayRouting:
         await agent.process(inp)
         elapsed_ms = (time.monotonic() - start) * 1000
         assert elapsed_ms < 100, f"RelayAgent took {elapsed_ms:.1f}ms — must be <100ms"
+
+
+# ─────────────────────────────────────────────
+# R17 — classify() module function used by CruzAgent pre-filter
+# ─────────────────────────────────────────────
+
+import time as _time
+
+
+class TestRelayClassifyFunction:
+    def test_classify_is_importable(self):
+        from agents.relay.relay_agent import classify  # noqa: F401
+
+    def test_returns_none_for_empty_string(self):
+        from agents.relay.relay_agent import classify
+        assert classify("") is None
+
+    def test_returns_none_when_no_keyword_matches(self):
+        from agents.relay.relay_agent import classify
+        assert classify("hello, how are you today?") is None
+
+    def test_matches_forge_keyword(self):
+        from agents.relay.relay_agent import classify
+        assert classify("Please write a function that parses CSV") == "forge"
+
+    def test_matches_echo_keyword(self):
+        from agents.relay.relay_agent import classify
+        assert classify("Draft an email to ateet@ama.com") == "echo"
+
+    def test_matches_titan_keyword(self):
+        from agents.relay.relay_agent import classify
+        assert classify("Deploy to production now") == "titan"
+
+    def test_case_insensitive(self):
+        from agents.relay.relay_agent import classify
+        assert classify("DEPLOY TO PROD") == "titan"
+
+    def test_returns_lowercase_agent_name(self):
+        from agents.relay.relay_agent import classify
+        result = classify("Please refactor this module")
+        assert result == result.lower()
+
+    def test_first_match_wins(self):
+        from agents.relay.relay_agent import classify
+        assert classify("Create a task for deployment prep") == "pm"
+
+    def test_completes_under_100ms(self):
+        from agents.relay.relay_agent import classify
+        start = _time.monotonic()
+        classify("write a function to parse CSV files efficiently")
+        elapsed_ms = (_time.monotonic() - start) * 1000
+        assert elapsed_ms < 100

@@ -18,13 +18,13 @@
 | 1.1 | `agents/base_agent.py` — BaseAgent, AgentInput, AgentOutput, handle_error, log | ✅ |
 | 1.2 | Alembic setup + schema migration (conversations, messages, agent_logs, tasks, users) | ✅ |
 | 1.3 | `services/db.py`, `services/redis_client.py`, `services/ollama.py` — shared singletons | ✅ |
-| 1.4 | `agents/relay/relay_agent.py` — keyword classifier, zero LLM calls | ⚠️ Built but unused |
+| 1.4 | `agents/relay/relay_agent.py` — keyword classifier, zero LLM calls | ✅ Wired as pre-filter (R17) |
 | 1.5 | `agents/general/general_agent.py` — Claude catch-all sub-agent | ✅ |
 | 1.6 | `agents/cruz/cruz_agent.py` — tool_use orchestration, agentic loop, conversation persistence | ✅ |
 | 1.7 | `POST /command` + SSE streaming, `GET /health`, `GET /conversations/:id/messages`, `GET /logs/:trace_id` | ✅ |
 | 1.8 | Tests: base_agent, relay, general, cruz_agent, cruz_conversation, command_endpoint, health, streaming, logs, conversations, db, redis, ollama | ✅ |
 
-**Notes:** RELAY exists but CruzAgent never calls it — Claude native tool_use is the real router.
+**Notes:** RELAY wired as tool-list pre-filter (R17 2026-04-14) — deterministic keyword hits narrow Claude's tool list; otherwise Claude native tool_use decides.
 
 ---
 
@@ -161,7 +161,7 @@ crashes before responding to any command** because:
 | R14 | ~~TITAN has no auto-rollback~~ | ✅ 2026-04-14 — on deploy failure, target-specific rollback (Vercel promote, Railway redeploy prior, SSH custom command); `auto_rollback=False` opts out; skipped gracefully if no rollback params supplied |
 | R15 | ~~QT has no Playwright, no Lighthouse~~ | ✅ 2026-04-14 — two new test_type modes: `playwright` (parses pass/fail counts) and `lighthouse` (gates on score threshold, default 0.9) |
 | R16 | ~~Voice speak is a stub~~ | ✅ 2026-04-14 — Inworld TTS via REST + macOS `say` fallback; `WakeWordDetector` wrapping pvporcupine; new `POST /voice/speak` endpoint |
-| R17 | RELAY is dead code (imported, never called by CruzAgent) | Either wire it or delete it |
+| R17 | ~~RELAY is dead code~~ | ✅ 2026-04-14 — wired as tool-list pre-filter. `classify(task)` narrows Claude's CRUZ_TOOLS list when a deterministic keyword matches; full list otherwise. Zero LLM calls. |
 
 ### 🟡 Documentation drift (P2)
 
@@ -196,7 +196,7 @@ Tackle in client-value order:
 8. ✅ **R14** TITAN auto-rollback on failed deploy — done 2026-04-14
 9. ✅ **R15** QT Playwright + Lighthouse — done 2026-04-14
 10. ✅ **R16** VoicePipeline.speak() + Porcupine wake word — done 2026-04-14
-11. **R17** Decide on RELAY: wire as pre-filter or delete
+11. ✅ **R17** RELAY wired as pre-filter — done 2026-04-14
 
 ### 📝 Docs still drifting (P2)
 - R18 README test count ✅ fixed

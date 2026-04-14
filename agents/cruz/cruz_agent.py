@@ -35,6 +35,7 @@ from agents.titan.titan_agent import TitanAgent
 from agents.mark.mark_agent import MarkAgent
 from agents.raw.raw_agent import RawAgent
 from agents.pulse.pulse_agent import PulseAgent
+from agents.relay.relay_agent import classify
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
@@ -234,13 +235,28 @@ class CruzAgent(BaseAgent):
 
             messages.append({"role": "user", "content": input["task"]})
 
+            # ── RELAY pre-filter ──────────────────────────────────────────
+            # Deterministic keyword hit → narrow Claude's tool list to that
+            # one tool. No match → pass all tools (existing behavior).
+            # Unknown hint (e.g. "qt" not in CRUZ_TOOLS yet) → full list.
+            tools = CRUZ_TOOLS
+            relay_hint = classify(input["task"])
+            if relay_hint:
+                filtered = [t for t in CRUZ_TOOLS if t["name"] == relay_hint]
+                if filtered:
+                    tools = filtered
+                    logger.info(
+                        "[%s] RELAY pre-filter: narrowed tools to '%s'",
+                        input["trace_id"], relay_hint,
+                    )
+
             # Agentic loop: continue until end_turn or approval gate hit
             while True:
                 response = await client.messages.create(
                     model=_MODEL,
                     max_tokens=8096,
                     system=_SYSTEM_PROMPT,
-                    tools=CRUZ_TOOLS,
+                    tools=tools,
                     messages=messages,
                 )
 

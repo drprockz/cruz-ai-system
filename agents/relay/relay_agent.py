@@ -17,7 +17,7 @@ Adding a new routing rule: add one entry to AGENT_KEYWORDS.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
@@ -93,6 +93,26 @@ AGENT_KEYWORDS: Dict[str, str] = {
     "morning briefing": "PULSE",
     "what happened today": "PULSE",
 }
+
+
+def classify(task: str) -> Optional[str]:
+    """
+    Lightweight keyword classifier used by CruzAgent as a tool-list pre-filter.
+
+    Returns the LOWERCASE agent name (e.g. "forge", "titan") if any keyword
+    in AGENT_KEYWORDS matches the task, or None when there's no match.
+
+    Unlike RelayAgent.process(), this function never returns a "GENERAL"
+    fallback — None tells the caller "no keyword hit, let Claude decide
+    from the full tool list." Zero LLM calls, zero I/O.
+    """
+    if not task:
+        return None
+    task_lower = task.lower()
+    for keyword, agent_name in AGENT_KEYWORDS.items():
+        if keyword.lower() in task_lower:
+            return agent_name.lower()
+    return None
 
 
 class RelayAgent(BaseAgent):

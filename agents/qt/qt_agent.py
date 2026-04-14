@@ -83,6 +83,10 @@ class QTAgent(BaseAgent):
                 result, success = await self._run_pytest(input["context"])
             elif test_type == "npm_audit":
                 result, success = await self._run_npm_audit(input["context"])
+            elif test_type == "playwright":
+                result, success = await self._run_playwright(input["context"])
+            elif test_type == "lighthouse":
+                result, success = await self._run_lighthouse(input["context"])
             elif test_type == "generate":
                 result, success, tokens = await self._generate_tests(input)
                 duration = int((time.monotonic() - start) * 1000)
@@ -109,7 +113,10 @@ class QTAgent(BaseAgent):
                     approval_prompt=None,
                 )
             else:
-                err = f"Unknown test_type '{test_type}'. Supported: pytest, npm_audit, generate."
+                err = (
+                    f"Unknown test_type '{test_type}'. "
+                    f"Supported: pytest, npm_audit, playwright, lighthouse, generate."
+                )
                 try:
                     await self.log(
                         db=db,
@@ -227,6 +234,62 @@ class QTAgent(BaseAgent):
             "output": output,
         }, success
 
+    async def _run_playwright(self, context: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """Run `npx playwright test` in project_path and parse pass/fail counts."""
+        project_path = context.get("project_path", ".")
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "playwright", "test",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=project_path,
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode(errors="replace")
+        parsed = _parse_playwright_output(output)
+        success = proc.returncode == 0 and parsed["failed"] == 0
+        return {
+            "test_type": "playwright",
+            "passed": parsed["passed"],
+            "failed": parsed["failed"],
+            "output": output,
+        }, success
+
+    async def _run_lighthouse(self, context: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """
+        Run `npx lighthouse <url> --output=json` and gate on a score threshold.
+
+        Default threshold is 0.9 (90%). Any category below threshold → success=False.
+        Expects context["url"]; raises ValueError if missing.
+        """
+        url = (context.get("url") or "").strip()
+        if not url:
+            raise ValueError(
+                "Lighthouse mode requires context['url'] — the target URL to audit."
+            )
+        threshold = float(context.get("threshold", 0.9))
+
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "lighthouse", url,
+            "--output=json", "--quiet", "--chrome-flags=--headless",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode(errors="replace")
+        scores = _parse_lighthouse_output(output)
+        # success = every category scored >= threshold
+        success = (
+            proc.returncode == 0
+            and bool(scores)
+            and all(s >= threshold for s in scores.values())
+        )
+        return {
+            "test_type": "lighthouse",
+            "url": url,
+            "threshold": threshold,
+            "scores": scores,
+        }, success
+
     async def _generate_tests(
         self, input: AgentInput
     ) -> Tuple[Dict[str, Any], bool, int]:
@@ -305,3 +368,46 @@ def _parse_npm_audit_output(text: str) -> Dict[str, int]:
         return {k: int(v) for k, v in vulns.items()}
     except (json.JSONDecodeError, TypeError, ValueError):
         return {}
+
+
+def _parse_playwright_output(text: str) -> Dict[str, int]:
+    """
+    Extract pass/fail counts from Playwright's default reporter output.
+
+    Summary lines look like:
+      "5 passed (12.3s)"
+      "3 passed, 2 failed (14.1s)"
+      "4 failed (2.0s)"
+    """
+    result = {"passed": 0, "failed": 0}
+    passed = re.search(r"(\d+)\s+passed", text)
+    failed = re.search(r"(\d+)\s+failed", text)
+    if passed:
+        result["passed"] = int(passed.group(1))
+    if failed:
+        result["failed"] = int(failed.group(1))
+    return result
+
+
+def _parse_lighthouse_output(text: str) -> Dict[str, float]:
+    """
+    Extract category scores from lighthouse --output=json output.
+
+    Lighthouse prints the full JSON report to stdout. We pull out
+    categories[k].score (float in [0, 1]) for the standard categories.
+
+    Returns empty dict on parse failure.
+    """
+    if not text or not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    categories = data.get("categories") or {}
+    scores: Dict[str, float] = {}
+    for name, payload in categories.items():
+        score = payload.get("score") if isinstance(payload, dict) else None
+        if isinstance(score, (int, float)):
+            scores[name] = float(score)
+    return scores

@@ -484,3 +484,219 @@ class TestParseNpmAuditOutput:
         from agents.qt.qt_agent import _parse_npm_audit_output
         result = _parse_npm_audit_output("not json")
         assert isinstance(result, dict)
+
+
+# ─────────────────────────────────────────────
+# R15 — Playwright mode
+# ─────────────────────────────────────────────
+
+_PLAYWRIGHT_PASS_OUTPUT = b"""
+Running 5 tests using 1 worker
+
+  ok  1 [chromium] > tests/login.spec.ts:3:5 > login
+  ok  2 [chromium] > tests/signup.spec.ts:3:5 > signup
+  ok  3 [chromium] > tests/dashboard.spec.ts:3:5 > dashboard
+  ok  4 [chromium] > tests/nav.spec.ts:3:5 > nav
+  ok  5 [chromium] > tests/checkout.spec.ts:3:5 > checkout
+
+  5 passed (12.3s)
+"""
+
+_PLAYWRIGHT_FAIL_OUTPUT = b"""
+Running 5 tests using 1 worker
+
+  ok  1 > tests/login.spec.ts > login
+  ok  2 > tests/signup.spec.ts > signup
+  -- failure
+  3 passed, 2 failed (14.1s)
+"""
+
+
+@pytest.mark.asyncio
+class TestQTAgentPlaywright:
+    async def test_playwright_returns_success_true_when_all_pass(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_PLAYWRIGHT_PASS_OUTPUT)
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_input(test_type="playwright"))
+        assert result["success"] is True
+        assert result["result"]["passed"] == 5
+        assert result["result"]["failed"] == 0
+
+    async def test_playwright_returns_success_false_on_failures(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=1, stdout=_PLAYWRIGHT_FAIL_OUTPUT)
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_input(test_type="playwright"))
+        assert result["success"] is False
+        assert result["result"]["passed"] == 3
+        assert result["result"]["failed"] == 2
+
+    async def test_playwright_runs_npx_playwright_in_project_path(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_PLAYWRIGHT_PASS_OUTPUT)
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)) as mock_exec, \
+             patch("agents.qt.qt_agent.get_db_service"):
+            await QTAgent().process(_make_input(
+                test_type="playwright", project_path="/apps/ama"
+            ))
+        args = mock_exec.call_args
+        assert args[0][0] == "npx"
+        assert args[0][1] == "playwright"
+        assert args[0][2] == "test"
+        assert args.kwargs["cwd"] == "/apps/ama"
+
+    async def test_playwright_result_test_type_label(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_PLAYWRIGHT_PASS_OUTPUT)
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_input(test_type="playwright"))
+        assert result["result"]["test_type"] == "playwright"
+
+
+# ─────────────────────────────────────────────
+# R15 — Lighthouse mode
+# ─────────────────────────────────────────────
+
+def _lighthouse_json(
+    performance: float = 0.95,
+    accessibility: float = 0.97,
+    best_practices: float = 0.92,
+    seo: float = 1.0,
+) -> bytes:
+    return json.dumps({
+        "categories": {
+            "performance": {"score": performance},
+            "accessibility": {"score": accessibility},
+            "best-practices": {"score": best_practices},
+            "seo": {"score": seo},
+        },
+    }).encode()
+
+
+def _make_lighthouse_input(
+    url: str = "https://ama.example.com",
+    threshold: float | None = None,
+) -> AgentInput:
+    ctx: dict = {"test_type": "lighthouse", "url": url}
+    if threshold is not None:
+        ctx["threshold"] = threshold
+    return {
+        "task": "Lighthouse audit",
+        "context": ctx,
+        "trace_id": "trace-qt-lighthouse",
+        "conversation_id": "conv-qt-lighthouse",
+    }
+
+
+@pytest.mark.asyncio
+class TestQTAgentLighthouse:
+    async def test_lighthouse_returns_success_when_scores_above_threshold(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_lighthouse_json())
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_lighthouse_input())
+        assert result["success"] is True
+        scores = result["result"]["scores"]
+        assert scores["performance"] == 0.95
+        assert scores["accessibility"] == 0.97
+
+    async def test_lighthouse_returns_success_false_when_below_threshold(self):
+        from agents.qt.qt_agent import QTAgent
+        # performance=0.6 is below default 0.9 threshold
+        proc = _mock_process(returncode=0, stdout=_lighthouse_json(performance=0.6))
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_lighthouse_input())
+        assert result["success"] is False
+
+    async def test_lighthouse_respects_custom_threshold(self):
+        from agents.qt.qt_agent import QTAgent
+        # All scores >= 0.7, user's threshold is 0.7 → should pass
+        proc = _mock_process(returncode=0, stdout=_lighthouse_json(
+            performance=0.75, accessibility=0.80, best_practices=0.72, seo=0.90,
+        ))
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_lighthouse_input(threshold=0.7))
+        assert result["success"] is True
+
+    async def test_lighthouse_requires_url(self):
+        from agents.qt.qt_agent import QTAgent
+        bad_input = {
+            "task": "audit",
+            "context": {"test_type": "lighthouse"},  # no url
+            "trace_id": "t",
+            "conversation_id": "c",
+        }
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock()), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(bad_input)
+        assert result["success"] is False
+        assert "url" in (result["error"] or "").lower()
+
+    async def test_lighthouse_runs_npx_lighthouse_with_url(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_lighthouse_json())
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)) as mock_exec, \
+             patch("agents.qt.qt_agent.get_db_service"):
+            await QTAgent().process(_make_lighthouse_input(
+                url="https://shooterista.com"
+            ))
+        args = mock_exec.call_args[0]
+        # e.g. ["npx", "lighthouse", "https://shooterista.com", ...]
+        assert args[0] == "npx"
+        assert args[1] == "lighthouse"
+        assert "https://shooterista.com" in args
+
+    async def test_lighthouse_result_test_type_label(self):
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_lighthouse_json())
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            result = await QTAgent().process(_make_lighthouse_input())
+        assert result["result"]["test_type"] == "lighthouse"
+
+
+# ─────────────────────────────────────────────
+# R15 — _parse_playwright_output helper
+# ─────────────────────────────────────────────
+
+class TestPlaywrightOutputParsing:
+    def test_parses_all_passed(self):
+        from agents.qt.qt_agent import _parse_playwright_output
+        result = _parse_playwright_output("5 passed (12.3s)")
+        assert result["passed"] == 5
+        assert result["failed"] == 0
+
+    def test_parses_mixed(self):
+        from agents.qt.qt_agent import _parse_playwright_output
+        result = _parse_playwright_output("3 passed, 2 failed (14.1s)")
+        assert result["passed"] == 3
+        assert result["failed"] == 2
+
+    def test_parses_all_failed(self):
+        from agents.qt.qt_agent import _parse_playwright_output
+        result = _parse_playwright_output("4 failed (2.0s)")
+        assert result["failed"] == 4
+        assert result["passed"] == 0
+
+    def test_returns_zeros_on_no_match(self):
+        from agents.qt.qt_agent import _parse_playwright_output
+        result = _parse_playwright_output("gibberish output")
+        assert result["passed"] == 0
+        assert result["failed"] == 0

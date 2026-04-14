@@ -159,7 +159,7 @@ crashes before responding to any command** because:
 | R12 | ~~PM drafts but creates nothing~~ | ✅ 2026-04-14 — `services/plane.py` + PM send mode creates one Plane issue per sprint task; per-ticket flags |
 | R13 | ~~CATCH doesn't push action items~~ | ✅ 2026-04-14 — CATCH send mode creates one Plane issue per action item; partial failures non-fatal |
 | R14 | ~~TITAN has no auto-rollback~~ | ✅ 2026-04-14 — on deploy failure, target-specific rollback (Vercel promote, Railway redeploy prior, SSH custom command); `auto_rollback=False` opts out; skipped gracefully if no rollback params supplied |
-| R15 | QT has no Playwright, no Lighthouse | Only pytest + npm audit |
+| R15 | ~~QT has no Playwright, no Lighthouse~~ | ✅ 2026-04-14 — two new test_type modes: `playwright` (parses pass/fail counts) and `lighthouse` (gates on score threshold, default 0.9) |
 | R16 | Voice `speak()` is a stub — no Inworld TTS, no Porcupine wake word | Voice pipeline is STT-only |
 | R17 | RELAY is dead code (imported, never called by CruzAgent) | Either wire it or delete it |
 
@@ -194,7 +194,7 @@ Tackle in client-value order:
 6. ✅ **R12** PM push tickets to Plane.so — done 2026-04-14
 7. ✅ **R13** CATCH push action items to Plane.so — done 2026-04-14
 8. ✅ **R14** TITAN auto-rollback on failed deploy — done 2026-04-14
-9. **R15** QT Playwright + Lighthouse
+9. ✅ **R15** QT Playwright + Lighthouse — done 2026-04-14
 10. **R16** VoicePipeline.speak() + Porcupine wake word
 11. **R17** Decide on RELAY: wire as pre-filter or delete
 

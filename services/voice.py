@@ -42,7 +42,13 @@ except ImportError:  # pragma: no cover — only needed when backend=openwakewor
 
 logger = logging.getLogger("cruz.services.voice")
 
-_WHISPER_MODEL = "openai/whisper-large-v3"
+# Whisper model — configurable via WHISPER_MODEL env var.
+# Default 'small' gives ~2s transcribes on Mac Mini M4 CPU with
+# excellent English accuracy. Use 'large-v3' only when you need
+# non-English or nuanced dictation and can tolerate ~30s/call.
+_WHISPER_MODEL = os.environ.get(
+    "WHISPER_MODEL", "openai/whisper-small"
+)
 _INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice"
 _INWORLD_MODEL = "inworld-tts-1.5-max"
 _INWORLD_DEFAULT_VOICE = "default--ypb7u4pb7ydy8zij82pta__jarvis_20"  # JARVIS preset
@@ -174,18 +180,34 @@ class VoicePipeline:
         return base64.b64decode(encoded)
 
     async def _speak_say(self, text: str) -> bytes:
-        """Run macOS `say` and capture AIFF bytes from stdout."""
-        proc = await asyncio.create_subprocess_exec(
-            "say", "-o", "/dev/stdout", "--data-format=LEI16@22050", text,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"macOS say exit={proc.returncode}: {stderr.decode(errors='replace')[:200]}"
+        """
+        Run macOS `say`, write AIFF to a temp file, read+return bytes.
+
+        `say -o /dev/stdout` does NOT work reliably on macOS — the tool
+        refuses to write audio to a non-seekable stream. Must use a real
+        file path.
+        """
+        path = tempfile.mktemp(suffix=".aiff")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "say", "-o", path, text,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-        return stdout
+            _stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"macOS say exit={proc.returncode}: "
+                    f"{stderr.decode(errors='replace')[:200]}"
+                )
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 # ─────────────────────────────────────────────

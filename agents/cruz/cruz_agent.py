@@ -366,13 +366,27 @@ class CruzAgent(BaseAgent):
                         input["trace_id"], relay_hint,
                     )
 
+            # Voice-mode brevity: when the request came from a voice device,
+            # append an instruction so CRUZ gives a short, spoken-style reply
+            # instead of a multi-paragraph answer with bullet points.
+            system_prompt = _SYSTEM_PROMPT
+            max_reply_tokens = 8096
+            if device in ("mac_mini", "phone", "ipad"):
+                system_prompt = _SYSTEM_PROMPT + (
+                    "\n\nIMPORTANT: The user is speaking via voice. Your reply will be "
+                    "read aloud by a TTS engine. Answer in 1-2 plain sentences, under "
+                    "40 words. No bullet points, no markdown, no code blocks, no lists. "
+                    "Be conversational, direct, and brief."
+                )
+                max_reply_tokens = 512
+
             # Agentic loop: continue until end_turn or approval gate hit
             while True:
                 response = await llm_chat(
-                    system=_SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=messages,
                     tools=tools,
-                    max_tokens=8096,
+                    max_tokens=max_reply_tokens,
                 )
 
                 total_tokens += response.usage.input_tokens + response.usage.output_tokens

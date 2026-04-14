@@ -261,13 +261,14 @@ class TestVoicePipelineSpeak:
 
     @pytest.mark.asyncio
     async def test_speak_falls_back_to_say_when_no_key(self):
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.communicate = AsyncMock(return_value=(b"AIFFDATA", b""))
+        # _speak_say now writes AIFF to a temp file and reads bytes back,
+        # so mocking subprocess alone isn't enough — patch the helper
+        # directly to return the bytes we want to verify pass-through.
+        pipeline = VoicePipeline()
         with patch.dict(os.environ, {"INWORLD_API_KEY": ""}, clear=True), \
-             patch("services.voice.asyncio.create_subprocess_exec",
-                   AsyncMock(return_value=proc)):
-            audio = await VoicePipeline().speak("Hi")
+             patch.object(pipeline, "_speak_say",
+                          new=AsyncMock(return_value=b"AIFFDATA")):
+            audio = await pipeline.speak("Hi")
         assert audio == b"AIFFDATA"
 
     @pytest.mark.asyncio
@@ -275,15 +276,12 @@ class TestVoicePipelineSpeak:
         bad_resp = _mock_inworld_response(status=500)
         pc, _ = _patch_inworld_httpx(bad_resp)
 
-        proc = MagicMock()
-        proc.returncode = 0
-        proc.communicate = AsyncMock(return_value=(b"FALLBACK", b""))
-
         env = {"INWORLD_API_KEY": "inworld_test"}
+        pipeline = VoicePipeline()
         with patch.dict(os.environ, env, clear=False), pc, \
-             patch("services.voice.asyncio.create_subprocess_exec",
-                   AsyncMock(return_value=proc)):
-            audio = await VoicePipeline().speak("Hello")
+             patch.object(pipeline, "_speak_say",
+                          new=AsyncMock(return_value=b"FALLBACK")):
+            audio = await pipeline.speak("Hello")
         assert audio == b"FALLBACK"
 
     @pytest.mark.asyncio
@@ -291,16 +289,13 @@ class TestVoicePipelineSpeak:
         bad_resp = _mock_inworld_response(status=500)
         pc, _ = _patch_inworld_httpx(bad_resp)
 
-        bad_proc = MagicMock()
-        bad_proc.returncode = 1
-        bad_proc.communicate = AsyncMock(return_value=(b"", b"say: no such"))
-
         env = {"INWORLD_API_KEY": "inworld_test"}
+        pipeline = VoicePipeline()
         with patch.dict(os.environ, env, clear=False), pc, \
-             patch("services.voice.asyncio.create_subprocess_exec",
-                   AsyncMock(return_value=bad_proc)):
+             patch.object(pipeline, "_speak_say",
+                          new=AsyncMock(side_effect=RuntimeError("say not found"))):
             with pytest.raises(RuntimeError, match="TTS"):
-                await VoicePipeline().speak("Hello")
+                await pipeline.speak("Hello")
 
 
 # ─────────────────────────────────────────────

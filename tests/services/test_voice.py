@@ -304,18 +304,57 @@ class TestVoicePipelineSpeak:
 
 
 # ─────────────────────────────────────────────
-# WakeWordDetector (R16)
+# WakeWordDetector — two backends (picovoice + openwakeword)
 # ─────────────────────────────────────────────
 
-class TestWakeWordDetector:
+class TestWakeWordDetectorInterface:
     def test_can_be_imported(self):
         from services.voice import WakeWordDetector  # noqa: F401
 
+    def test_default_backend_is_openwakeword(self):
+        """No Picovoice approval needed for default usage — openWakeWord is free."""
+        from services.voice import WakeWordDetector
+        # Force picovoice env missing, so if the default was picovoice we'd crash
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock()
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": ""}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            # Should not raise — openwakeword doesn't need a key
+            WakeWordDetector(keyword="hey_jarvis")
+        fake_oww.Model.assert_called_once()
+
+    def test_explicit_backend_picovoice(self):
+        from services.voice import WakeWordDetector
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=MagicMock())
+        with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            WakeWordDetector(backend="picovoice", keyword_path="/tmp/Hey_CRUZ.ppn")
+        fake_pv.create.assert_called_once()
+
+    def test_env_var_picks_backend(self):
+        from services.voice import WakeWordDetector
+        fake_pv = MagicMock()
+        fake_pv.create = MagicMock(return_value=MagicMock())
+        env = {"WAKE_WORD_BACKEND": "picovoice", "PICOVOICE_ACCESS_KEY": "pv"}
+        with patch.dict(os.environ, env, clear=False), \
+             patch("services.voice.pvporcupine", fake_pv):
+            WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+        fake_pv.create.assert_called_once()
+
+    def test_unknown_backend_raises(self):
+        from services.voice import WakeWordDetector
+        with pytest.raises(RuntimeError, match="unknown backend|WAKE_WORD_BACKEND"):
+            WakeWordDetector(backend="skynet")
+
+
+class TestPicovoiceBackend:
     def test_init_raises_without_access_key(self):
         from services.voice import WakeWordDetector
         with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": ""}, clear=True):
             with pytest.raises(RuntimeError, match="PICOVOICE_ACCESS_KEY"):
-                WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+                WakeWordDetector(backend="picovoice",
+                                 keyword_path="/tmp/Hey_CRUZ.ppn")
 
     def test_init_calls_pvporcupine_create(self):
         from services.voice import WakeWordDetector
@@ -323,7 +362,8 @@ class TestWakeWordDetector:
         fake_pv.create = MagicMock(return_value=MagicMock())
         with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv_test"}, clear=False), \
              patch("services.voice.pvporcupine", fake_pv):
-            WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            WakeWordDetector(backend="picovoice",
+                             keyword_path="/tmp/Hey_CRUZ.ppn")
         fake_pv.create.assert_called_once()
         kwargs = fake_pv.create.call_args.kwargs
         assert kwargs["access_key"] == "pv_test"
@@ -332,12 +372,13 @@ class TestWakeWordDetector:
     def test_detect_returns_true_when_keyword_matches(self):
         from services.voice import WakeWordDetector
         handle = MagicMock()
-        handle.process = MagicMock(return_value=0)  # keyword index 0 → match
+        handle.process = MagicMock(return_value=0)
         fake_pv = MagicMock()
         fake_pv.create = MagicMock(return_value=handle)
         with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
              patch("services.voice.pvporcupine", fake_pv):
-            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            det = WakeWordDetector(backend="picovoice",
+                                   keyword_path="/tmp/Hey_CRUZ.ppn")
             assert det.detect([0] * 512) is True
 
     def test_detect_returns_false_when_no_match(self):
@@ -348,10 +389,11 @@ class TestWakeWordDetector:
         fake_pv.create = MagicMock(return_value=handle)
         with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
              patch("services.voice.pvporcupine", fake_pv):
-            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            det = WakeWordDetector(backend="picovoice",
+                                   keyword_path="/tmp/Hey_CRUZ.ppn")
             assert det.detect([0] * 512) is False
 
-    def test_close_releases_porcupine_handle(self):
+    def test_close_releases_handle(self):
         from services.voice import WakeWordDetector
         handle = MagicMock()
         handle.delete = MagicMock()
@@ -359,6 +401,70 @@ class TestWakeWordDetector:
         fake_pv.create = MagicMock(return_value=handle)
         with patch.dict(os.environ, {"PICOVOICE_ACCESS_KEY": "pv"}, clear=False), \
              patch("services.voice.pvporcupine", fake_pv):
-            det = WakeWordDetector(keyword_path="/tmp/Hey_CRUZ.ppn")
+            det = WakeWordDetector(backend="picovoice",
+                                   keyword_path="/tmp/Hey_CRUZ.ppn")
             det.close()
         handle.delete.assert_called_once()
+
+
+class TestOpenWakeWordBackend:
+    def test_init_loads_builtin_keyword_model(self):
+        from services.voice import WakeWordDetector
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            WakeWordDetector(backend="openwakeword", keyword="hey_jarvis")
+        fake_oww.Model.assert_called_once()
+        kwargs = fake_oww.Model.call_args.kwargs
+        # Model should be loaded with the hey_jarvis pretrained model
+        blob = str(kwargs).lower()
+        assert "hey_jarvis" in blob or "jarvis" in blob
+
+    def test_detect_returns_true_when_score_above_threshold(self):
+        """Score >= 0.5 → match."""
+        from services.voice import WakeWordDetector
+        model = MagicMock()
+        model.predict = MagicMock(return_value={"hey_jarvis": 0.87})
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock(return_value=model)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            det = WakeWordDetector(backend="openwakeword", keyword="hey_jarvis")
+            assert det.detect([0] * 1280) is True
+
+    def test_detect_returns_false_when_score_below_threshold(self):
+        from services.voice import WakeWordDetector
+        model = MagicMock()
+        model.predict = MagicMock(return_value={"hey_jarvis": 0.12})
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock(return_value=model)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            det = WakeWordDetector(backend="openwakeword", keyword="hey_jarvis")
+            assert det.detect([0] * 1280) is False
+
+    def test_custom_threshold_respected(self):
+        """Operator can lower the threshold to reduce missed wakes."""
+        from services.voice import WakeWordDetector
+        model = MagicMock()
+        model.predict = MagicMock(return_value={"hey_jarvis": 0.30})
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock(return_value=model)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            # With threshold=0.25, 0.30 should now count as match
+            det = WakeWordDetector(
+                backend="openwakeword", keyword="hey_jarvis", threshold=0.25,
+            )
+            assert det.detect([0] * 1280) is True
+
+    def test_close_is_safe(self):
+        """openWakeWord model has no explicit close — wrapper must no-op cleanly."""
+        from services.voice import WakeWordDetector
+        fake_oww = MagicMock()
+        fake_oww.Model = MagicMock(return_value=MagicMock())
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("services.voice.openwakeword", fake_oww):
+            det = WakeWordDetector(backend="openwakeword", keyword="hey_jarvis")
+            det.close()  # should not raise

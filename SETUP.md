@@ -355,6 +355,83 @@ other two snapshots still upload and the failure is logged.
 
 ---
 
+## Voice daemon — "Hey CRUZ" always-listening loop
+
+`scripts/voice/listen.py` is the always-on voice client. It captures the
+mic, waits for the wake word, transcribes via `/voice/transcribe`, asks
+CRUZ via `/command`, and plays the reply via `/voice/speak`.
+
+### Install audio deps (one-time)
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+```
+This pulls `openwakeword`, `sounddevice`, and `soundfile`. On first launch
+`openwakeword` will download the `hey_jarvis` model (~5 MB).
+
+macOS microphone permission: System Settings → Privacy & Security →
+Microphone → allow Terminal (or whichever app runs the daemon).
+
+### Run it
+
+**Wake-word mode (default)** — say "Hey Jarvis":
+```bash
+python scripts/voice/listen.py
+```
+
+**Push-to-talk** — press Enter to record, no wake word:
+```bash
+python scripts/voice/listen.py --push-to-talk
+```
+
+**One-shot** — handy for testing the pipeline:
+```bash
+python scripts/voice/listen.py --push-to-talk --once
+```
+
+### Env vars
+
+```bash
+# Backend: openwakeword (default, no signup) | picovoice (needs access key)
+WAKE_WORD_BACKEND=openwakeword
+CRUZ_VOICE_KEYWORD=hey_jarvis      # any pretrained openWakeWord model
+# or, for picovoice backend:
+PICOVOICE_ACCESS_KEY=...            # free consumer tier at console.picovoice.ai
+```
+
+### Switching to a custom "Hey CRUZ" wake word (later)
+
+Two paths:
+1. **Train a Picovoice custom keyword** at console.picovoice.ai →
+   download the `.ppn` → set `WAKE_WORD_BACKEND=picovoice` and pass
+   `keyword_path=...` when constructing the detector.
+2. **Train an openWakeWord custom model** using their
+   [training docs](https://github.com/dscripka/openWakeWord) → drop
+   the `.tflite` file alongside the package → set `CRUZ_VOICE_KEYWORD`
+   to its name.
+
+Until then, "Hey Jarvis" works out of the box with zero signups.
+
+### Running under PM2 (optional)
+
+Add a third process to `ecosystem.config.js`:
+```js
+{
+  name: "cruz-voice",
+  script: VENV_PY,
+  args: "scripts/voice/listen.py",
+  cwd: ROOT,
+  interpreter: "none",
+  autorestart: true,
+  env: { PYTHONUNBUFFERED: "1", PYTHONPATH: ROOT },
+}
+```
+
+Only do this on a machine with a mic; the daemon errors loudly when
+`sounddevice` can't find an input device.
+
+---
+
 ## Monitoring stack (Phase 6.2)
 
 CRUZ ships with an optional self-hosted monitoring stack: **Uptime Kuma**

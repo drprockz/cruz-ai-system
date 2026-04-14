@@ -84,3 +84,6 @@ typing_extensions==4.15.0
 urllib3==2.6.3
 uvicorn==0.39.0
 yarl==1.22.0
+openwakeword
+sounddevice
+soundfile

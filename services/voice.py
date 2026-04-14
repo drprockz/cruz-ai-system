@@ -32,8 +32,13 @@ from transformers import pipeline
 
 try:  # lazy — test suite patches services.voice.pvporcupine directly
     import pvporcupine  # type: ignore
-except ImportError:  # pragma: no cover — real environment installs pvporcupine
+except ImportError:  # pragma: no cover — only needed when backend=picovoice
     pvporcupine = None  # type: ignore
+
+try:  # lazy — test suite patches services.voice.openwakeword directly
+    import openwakeword  # type: ignore
+except ImportError:  # pragma: no cover — only needed when backend=openwakeword
+    openwakeword = None  # type: ignore
 
 logger = logging.getLogger("cruz.services.voice")
 
@@ -182,62 +187,146 @@ class VoicePipeline:
 # ─────────────────────────────────────────────
 
 
+_VALID_BACKENDS = ("openwakeword", "picovoice")
+
+
 class WakeWordDetector:
     """
-    Porcupine wake-word detector ("Hey CRUZ").
+    On-device wake-word detector with two pluggable backends.
 
-    On-device, ~1% CPU. Load a custom .ppn file trained on Picovoice
-    Console. Feed 512-sample int16 frames at 16 kHz to `detect()`.
+    Backends:
+      - **openwakeword** (default) — fully open source, no API key required.
+        Pre-trained models include 'hey_jarvis', 'alexa', 'hey_mycroft'.
+        Feed 1280-sample int16 frames at 16 kHz (80ms).
+      - **picovoice** — Porcupine. Needs PICOVOICE_ACCESS_KEY. Supports
+        custom .ppn models (e.g. a trained "Hey CRUZ" keyword).
+        Feed 512-sample int16 frames at 16 kHz.
 
-    Env:
-        PICOVOICE_ACCESS_KEY — required (free tier at picovoice.ai)
+    Backend selected by `backend=` arg (wins), then WAKE_WORD_BACKEND env
+    var, then default 'openwakeword'.
 
-    Usage:
-        det = WakeWordDetector(keyword_path="Hey_CRUZ.ppn")
+    Usage (openWakeWord — no signup):
+        det = WakeWordDetector(keyword="hey_jarvis")
         while True:
-            frame = read_mic_frame()    # 512 int16 samples
+            frame = read_mic_frame()
             if det.detect(frame):
                 trigger_cruz()
         det.close()
+
+    Usage (Picovoice custom model):
+        det = WakeWordDetector(backend="picovoice", keyword_path="Hey_CRUZ.ppn")
     """
 
     def __init__(
         self,
+        backend: Optional[str] = None,
+        keyword: Optional[str] = None,
         keyword_path: Optional[str] = None,
         keywords: Optional[Sequence[str]] = None,
+        threshold: float = 0.5,
+    ) -> None:
+        resolved = (
+            backend
+            or os.environ.get("WAKE_WORD_BACKEND", "").strip().lower()
+            or "openwakeword"
+        )
+        if resolved not in _VALID_BACKENDS:
+            raise RuntimeError(
+                f"unknown backend '{resolved}' — WAKE_WORD_BACKEND must be "
+                f"one of {_VALID_BACKENDS}"
+            )
+        self._backend = resolved
+        self._threshold = threshold
+        self._oww_model = None
+        self._pv_handle = None
+        self._keyword = keyword or "hey_jarvis"
+
+        if resolved == "openwakeword":
+            self._init_openwakeword()
+        else:
+            self._init_picovoice(keyword_path, keywords)
+
+    # ── backend init ──────────────────────────────────────────────────
+
+    def _init_openwakeword(self) -> None:
+        if openwakeword is None:
+            raise RuntimeError(
+                "openwakeword package not installed. "
+                "Run `pip install openwakeword`."
+            )
+        # Pretrained models live inside the openwakeword package.
+        # Default: 'hey_jarvis' — swap later for custom CRUZ model.
+        self._oww_model = openwakeword.Model(
+            wakeword_models=[self._keyword],
+            inference_framework="onnx",
+        )
+
+    def _init_picovoice(
+        self,
+        keyword_path: Optional[str],
+        keywords: Optional[Sequence[str]],
     ) -> None:
         access_key = os.environ.get("PICOVOICE_ACCESS_KEY", "").strip()
         if not access_key:
             raise RuntimeError(
-                "PICOVOICE_ACCESS_KEY is not set — cannot initialise wake word. "
-                "Get a free key at https://console.picovoice.ai."
+                "PICOVOICE_ACCESS_KEY is not set — cannot initialise "
+                "picovoice wake-word backend. Either get a free consumer "
+                "key at console.picovoice.ai or use the default "
+                "openwakeword backend (no signup)."
             )
         if pvporcupine is None:
             raise RuntimeError(
                 "pvporcupine package not installed. Run `pip install pvporcupine`."
             )
-
-        create_kwargs = {"access_key": access_key}
+        create_kwargs: dict = {"access_key": access_key}
         if keyword_path:
             create_kwargs["keyword_paths"] = [keyword_path]
         if keywords:
             create_kwargs["keywords"] = list(keywords)
-        self._handle = pvporcupine.create(**create_kwargs)
+        self._pv_handle = pvporcupine.create(**create_kwargs)
 
-    def detect(self, frame: List[int]) -> bool:
+    # ── detect / close ────────────────────────────────────────────────
+
+    def detect(self, frame) -> bool:
         """
         Process one audio frame. Returns True iff the wake word triggered.
 
-        `frame` must be 512 int16 samples at 16 kHz — Porcupine's contract.
+        Frame size depends on backend:
+          - openwakeword: 1280 int16 samples @ 16kHz (80ms chunks)
+          - picovoice:    512  int16 samples @ 16kHz
         """
-        idx = self._handle.process(frame)
+        if self._backend == "openwakeword":
+            scores = self._oww_model.predict(frame)
+            if not isinstance(scores, dict):
+                return False
+            best = max(scores.values(), default=0.0)
+            return best >= self._threshold
+        # picovoice
+        idx = self._pv_handle.process(frame)
         return isinstance(idx, int) and idx >= 0
 
     def close(self) -> None:
-        """Release the Porcupine handle (call on shutdown)."""
-        if self._handle is not None:
+        """Release backend resources (safe to call twice)."""
+        if self._backend == "picovoice" and self._pv_handle is not None:
             try:
-                self._handle.delete()
-            except Exception:  # best-effort — never crash on cleanup
+                self._pv_handle.delete()
+            except Exception:
                 pass
-            self._handle = None
+            self._pv_handle = None
+        # openwakeword.Model has no explicit close — drop the reference
+        self._oww_model = None
+
+    # ── Backend introspection ─────────────────────────────────────────
+
+    @property
+    def backend(self) -> str:
+        return self._backend
+
+    @property
+    def frame_length(self) -> int:
+        """Expected frame size in int16 samples."""
+        return 1280 if self._backend == "openwakeword" else 512
+
+    @property
+    def sample_rate(self) -> int:
+        return 16000  # both backends operate at 16kHz

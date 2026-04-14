@@ -53,9 +53,12 @@ _SAMPLE_WIDTH = 2  # int16 = 2 bytes
 
 # Silence detection heuristic — a very low RMS for this many consecutive ms
 # means the speaker is done. Tune if you clip the end of utterances.
-_SILENCE_RMS_THRESHOLD = 400
+_SILENCE_RMS_THRESHOLD = 300
 _SILENCE_DURATION_MS = 1500
-_MAX_UTTERANCE_MS = 10_000
+# Upper bound on a single utterance (hard timeout even if never silent)
+_MAX_UTTERANCE_MS = 15_000
+# Wait up to this long for speech to START after the wake word before giving up
+_WAIT_FOR_SPEECH_MS = 5_000
 _PTT_DURATION_MS = 8_000
 
 
@@ -185,8 +188,22 @@ def _record_ptt(duration_ms: int = _PTT_DURATION_MS) -> bytes:
 def _record_until_silence(
     duration_ms: int = _MAX_UTTERANCE_MS,
     silence_ms: int = _SILENCE_DURATION_MS,
+    wait_for_speech_ms: int = _WAIT_FOR_SPEECH_MS,
+    rms_threshold: int = _SILENCE_RMS_THRESHOLD,
+    debug: bool = False,
 ) -> bytes:
-    """Record from the mic until silence or hard timeout. Returns WAV bytes."""
+    """
+    Record from the mic until silence (after detecting speech) or timeout.
+
+    Algorithm:
+      1. Wait for speech to start (non-silent chunk) up to wait_for_speech_ms.
+      2. Once speech starts, keep recording — stop after silence_ms of
+         consecutive silence OR the hard max (duration_ms).
+      3. If speech never starts during the wait window, return what we've
+         captured so Whisper can have a shot anyway.
+
+    Debug=True prints per-chunk RMS so you can tune rms_threshold.
+    """
     try:
         import numpy as np
         import sounddevice as sd  # type: ignore
@@ -197,31 +214,51 @@ def _record_until_silence(
         )
     chunk_ms = 100
     chunk_frames = int(_SAMPLE_RATE * chunk_ms / 1000)
-    silence_chunks_needed = silence_ms // chunk_ms
-    max_chunks = duration_ms // chunk_ms
+    silence_chunks_needed = max(1, silence_ms // chunk_ms)
+    max_chunks = max(1, duration_ms // chunk_ms)
+    wait_chunks = max(1, wait_for_speech_ms // chunk_ms)
 
     collected: list = []
     silent = 0
+    speech_started = False
+    chunks_waited = 0
+
     stream = sd.InputStream(
         samplerate=_SAMPLE_RATE, channels=_CHANNELS, dtype="int16",
     )
     stream.start()
     try:
-        for _ in range(max_chunks):
+        for _i in range(max_chunks):
             audio, _ = stream.read(chunk_frames)
             collected.append(audio)
             rms = float(np.sqrt(np.mean(audio.astype("int32") ** 2)))
-            if rms < _SILENCE_RMS_THRESHOLD:
-                silent += 1
-                if silent >= silence_chunks_needed:
-                    break
+            is_speech = rms >= rms_threshold
+
+            if debug:
+                marker = "🔊" if is_speech else "· "
+                print(f"  {marker} chunk {_i:3d} rms={rms:8.1f} "
+                      f"speech_started={speech_started} silent={silent}")
+
+            if not speech_started:
+                if is_speech:
+                    speech_started = True
+                    silent = 0
+                else:
+                    chunks_waited += 1
+                    if chunks_waited >= wait_chunks:
+                        # No speech detected within the grace window
+                        break
             else:
-                silent = 0
+                if is_speech:
+                    silent = 0
+                else:
+                    silent += 1
+                    if silent >= silence_chunks_needed:
+                        break
     finally:
         stream.stop()
         stream.close()
 
-    import numpy as np
     audio = np.concatenate(collected) if collected else np.zeros(0, dtype="int16")
     return _pcm_to_wav_bytes(audio.tobytes())
 
@@ -346,7 +383,17 @@ def main() -> int:
                         help="Process one interaction then exit")
     parser.add_argument("--device", default="mac_mini")
     parser.add_argument("--conversation-id", default=None)
+    parser.add_argument("--debug-audio", action="store_true",
+                        help="Print per-chunk RMS while recording (for threshold tuning)")
     args = parser.parse_args()
+    if args.debug_audio:
+        # Monkey-patch the default debug flag
+        global _record_until_silence
+        _orig = _record_until_silence
+        def _record_debug(*a, **kw):
+            kw.setdefault("debug", True)
+            return _orig(*a, **kw)
+        _record_until_silence = _record_debug
 
     logging.basicConfig(
         level=logging.INFO,

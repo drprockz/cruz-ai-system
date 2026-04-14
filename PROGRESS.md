@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 14, 2026
-**Tests passing:** 1070 / 1070 mocked + 10 skipped (9 real-PostgreSQL integration tests opt-in via `DATABASE_URL_TEST`; 1 locust import guard when `locust` not installed)
+**Tests passing:** 1073 / 1073 mocked + 10 skipped (9 real-PostgreSQL integration tests opt-in via `DATABASE_URL_TEST`; 1 locust import guard when `locust` not installed)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The

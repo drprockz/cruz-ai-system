@@ -169,7 +169,14 @@ async def health_check() -> JSONResponse:
         reachable = await ollama.health_check()
         if reachable:
             models = await ollama.list_models()
-            missing = [m for m in _REQUIRED_OLLAMA_MODELS if m not in models]
+            # Ollama's /api/tags returns [{"name": "...", ...}] — normalise to
+            # just the names so membership checks work regardless of whether
+            # callers pass list[str] (tests) or list[dict] (real API).
+            model_names = [
+                m.get("name", "") if isinstance(m, dict) else str(m)
+                for m in models
+            ]
+            missing = [m for m in _REQUIRED_OLLAMA_MODELS if m not in model_names]
             results["ollama"] = {
                 "status": "reachable",
                 "models": models,

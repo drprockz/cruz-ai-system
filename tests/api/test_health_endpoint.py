@@ -402,3 +402,39 @@ class TestHealthOllamaRequiredModels:
              patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
             resp = TestClient(app).get("/health")
         assert resp.json()["status"] == "degraded"
+
+    def test_accepts_real_ollama_dict_shape(self):
+        """
+        Real Ollama /api/tags returns list[dict] with a `name` key, not
+        list[str]. Production bug 2026-04-14: health reported both models
+        as missing even when loaded because we compared dicts directly
+        against the required string names.
+        """
+        ollama = _ollama_with_models([
+            {"name": "qwen2.5-coder:14b", "size": 8988124298,
+             "details": {"parameter_size": "14.8B"}},
+            {"name": "llama3.1:8b", "size": 4920753328,
+             "details": {"parameter_size": "8.0B"}},
+        ])
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=ollama), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        body = resp.json()
+        assert body["ollama"]["missing"] == [], (
+            f"required models were detected as missing despite being loaded: "
+            f"{body['ollama']}"
+        )
+
+    def test_dict_shape_with_one_model_missing(self):
+        """Partial match under the real dict shape — only llama loaded."""
+        ollama = _ollama_with_models([
+            {"name": "llama3.1:8b", "size": 4920753328},
+        ])
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=ollama), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["ollama"]["missing"] == ["qwen2.5-coder:14b"]

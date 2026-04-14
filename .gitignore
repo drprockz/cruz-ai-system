@@ -80,3 +80,8 @@ qdrant_storage/
 *.bak
 *.tmp
 .hypothesis/
+
+# Phase 6.6 runtime artifacts
+scripts/load/results/
+logs/uptime/
+.claude/scheduled_tasks.lock

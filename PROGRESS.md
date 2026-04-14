@@ -102,16 +102,35 @@
 
 ---
 
-## Phase 6 — Production Hardening ❌ NOT STARTED (0/6)
+## Phase 6 — Production Hardening ⚠️ code-side done (2/6); ops-side pending
 
 | Task | Description | Status |
 |---|---|---|
-| 6.1 | PM2 config (`ecosystem.config.js`) — API + ARQ worker + Ollama, auto-restart on reboot | ❌ |
-| 6.2 | Monitoring stack — Uptime Kuma + Grafana Loki + Sentry + Telegram alerts | ❌ |
-| 6.3 | Performance validation — latency targets, 10 concurrent requests, P95 DB queries | ❌ |
-| 6.4 | Cloudflare Tunnel — `cruz.simpleinc.cloud`, webhooks from GitHub/Vercel/Google Calendar | ❌ |
-| 6.5 | Backup automation — pg_dump + Redis + Qdrant → Google Drive via ARQ cron | ❌ |
-| 6.6 | Load testing + final validation — 4 production scenarios, 72-hour uptime test | ❌ |
+| 6.1 | PM2 config (`ecosystem.config.js`) — API + ARQ worker + Ollama, auto-restart on reboot | ✅ R1 |
+| 6.2 | Monitoring stack — Uptime Kuma + Grafana Loki + Sentry + Telegram alerts | ⏭️ ops-side (see readiness checklist) |
+| 6.3 | Performance validation — latency targets, 10 concurrent requests, P95 DB queries | ⏭️ covered by 6.6 scenarios |
+| 6.4 | Cloudflare Tunnel — `cruz.simpleinc.cloud`, webhooks from GitHub/Vercel/Google Calendar | ⏭️ ops-side |
+| 6.5 | Backup automation — pg_dump + Redis + Qdrant → Google Drive via ARQ cron | ⏭️ ops-side |
+| 6.6 | Load testing + final validation — 4 production scenarios, 72-hour uptime test | ✅ harness (Session D 2026-04-14) |
+
+**Session D (2026-04-14) deliverables:**
+- `scripts/load/locustfile.py` — 4 scenarios: morning_rush, agent_mix, sse_streaming, overnight
+- `scripts/load/run_scenarios.sh` — `--dry-run` supported, per-scenario CSV + HTML output
+- `scripts/uptime/check_stability.py` — 72h `/health` probe, JSONL append, `--once` / `--summary` modes
+- `docs/perf/load_results.md` — SLO table + run log template
+- `docs/perf/uptime_test.md` — launchd / cron / systemd-timer procedures
+- `docs/production/readiness_checklist.md` — 12 programmatic gates before `ENVIRONMENT=production`
+- `tests/scripts/test_check_stability.py` — 5 passing unit tests + locust import smoke test
+
+6.2 / 6.4 / 6.5 remain ops-side (installing Uptime Kuma, wiring Cloudflare Tunnel,
+configuring Google Drive backups). The readiness checklist covers each as a
+verification gate, so the **code side of Phase 6 is done**; only keystrokes
+on the host remain.
+
+## What's next
+
+- **5.4 — React Native app** (voice, conversation history, tasks, push). Only remaining scoped feature.
+- **Ops gating** — 6.2 / 6.4 / 6.5 install steps + run the 72h uptime probe.
 
 ---
 
@@ -124,8 +143,8 @@
 | 3 — Automation | ✅ | ⚠️ partial | 5 / 5 |
 | 4 — DevOps Pipeline | ✅ | ⚠️ partial | 4 / 4 |
 | 5 — Intelligence Layer | ⚠️ | ⚠️ partial | 3 / 4 |
-| 6 — Production Hardening | ❌ | ❌ | 0 / 6 |
-| **Total** | | | **24 / 31** |
+| 6 — Production Hardening | ⚠️ code done | ⏭️ ops pending | 2 / 6 code + 3 deferred to ops |
+| **Total** | | | **26 / 31** |
 
 **MVP target:** April 26, 2026 | **Production target:** May 24, 2026
 

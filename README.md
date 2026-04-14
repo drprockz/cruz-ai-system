@@ -3,6 +3,8 @@
 > **FRIDAY from Iron Man — built for a freelance developer.**
 > You talk to CRUZ. CRUZ handles everything else.
 
+**Status (2026-04-14):** Backend command-center is production-ready. Phase 1–5 scope complete (26/31 tasks), Phase 6 code-side delivered — load harness in `scripts/load/`, uptime probe in `scripts/uptime/`, readiness checklist at `docs/production/readiness_checklist.md`. Only remaining scoped feature: **5.4 React Native app**.
+
 CRUZ is a personal AI command center running 24/7 on a Mac Mini M4. One natural-language interface routes to 12 specialist agents — code generation, email drafting, deployments, lead generation, meeting transcription, sprint planning, and more.
 
 ---

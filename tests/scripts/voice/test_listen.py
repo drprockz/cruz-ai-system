@@ -205,11 +205,12 @@ class TestRunOneOrchestration:
         mock_cmd.assert_not_called()
         mock_speak.assert_not_called()
 
-    async def test_wake_mode_uses_detector_and_record_until_silence(self):
+    async def test_wake_mode_uses_detector_and_vad_capture(self):
+        """Wake-word mode must use VAD capture, not a fixed 6s window."""
         import listen
         fake_detector = MagicMock()
         with patch("listen._wait_for_wake", new_callable=AsyncMock) as mock_wake, \
-             patch("listen._record_until_silence", return_value=b"WAV"), \
+             patch("listen._record_with_vad", return_value=b"WAV") as mock_vad, \
              patch("listen.transcribe", new_callable=AsyncMock) as mock_trans, \
              patch("listen.command", new_callable=AsyncMock) as mock_cmd, \
              patch("listen.synthesize_and_play", new_callable=AsyncMock) as mock_speak:
@@ -222,6 +223,7 @@ class TestRunOneOrchestration:
                 conversation_id="c-1",
             )
         mock_wake.assert_awaited_once()
+        mock_vad.assert_called_once()  # VAD, NOT fixed-duration
         mock_trans.assert_awaited_once()
         mock_cmd.assert_awaited_once()
         mock_speak.assert_awaited_once()

@@ -185,6 +185,85 @@ def _record_ptt(duration_ms: int = _PTT_DURATION_MS) -> bytes:
     return _pcm_to_wav_bytes(audio.tobytes())
 
 
+def _record_with_vad(
+    max_ms: int = 15_000,
+    trailing_silence_ms: int = 500,
+    warmup_ms: int = 3_000,
+) -> bytes:
+    """
+    Record from the mic until Silero VAD detects end-of-speech.
+
+    Algorithm:
+      1. Keep feeding 512-sample frames (32 ms @ 16 kHz) to the VAD.
+      2. Flip `speech_started=True` on the first frame the VAD labels speech.
+      3. After `speech_started`, count consecutive silent frames; stop
+         once we hit `trailing_silence_ms` of quiet in a row.
+      4. If no speech ever starts in `warmup_ms`, return anyway so the
+         caller can fall through to Whisper (or skip).
+      5. Hard cap at `max_ms` so a stuck VAD can't stall forever.
+
+    Cuts typical utterance capture time from 6000ms (old fixed window)
+    to 1500-3000ms for a short question.
+    """
+    try:
+        import numpy as np
+        import sounddevice as sd  # type: ignore
+    except ImportError:
+        raise RuntimeError(
+            "sounddevice + numpy not installed. "
+            "Run: pip install sounddevice numpy soundfile"
+        )
+    # Lazy-imported so tests can run without silero-vad installed
+    from services.vad import SileroVAD
+
+    vad = SileroVAD(threshold=0.5)
+    frame_len = SileroVAD.FRAME_LENGTH  # 512
+    sample_rate = SileroVAD.SAMPLE_RATE  # 16000
+    chunk_ms = int(frame_len / sample_rate * 1000)  # ~32ms
+    max_chunks = max(1, max_ms // chunk_ms)
+    warmup_chunks = max(1, warmup_ms // chunk_ms)
+    trailing_chunks_needed = max(1, trailing_silence_ms // chunk_ms)
+
+    collected: list = []
+    silent_run = 0
+    speech_started = False
+    warmup_counter = 0
+
+    stream = sd.InputStream(
+        samplerate=sample_rate, channels=_CHANNELS, dtype="int16",
+    )
+    stream.start()
+    try:
+        for _i in range(max_chunks):
+            audio, _ = stream.read(frame_len)
+            flat = audio.flatten()
+            collected.append(flat)
+            is_speech = vad.is_speech(flat)
+
+            if not speech_started:
+                if is_speech:
+                    speech_started = True
+                    silent_run = 0
+                else:
+                    warmup_counter += 1
+                    if warmup_counter >= warmup_chunks:
+                        break
+            else:
+                if is_speech:
+                    silent_run = 0
+                else:
+                    silent_run += 1
+                    if silent_run >= trailing_chunks_needed:
+                        break
+    finally:
+        stream.stop()
+        stream.close()
+
+    import numpy as np
+    audio = np.concatenate(collected) if collected else np.zeros(0, dtype="int16")
+    return _pcm_to_wav_bytes(audio.tobytes())
+
+
 def _record_until_silence(
     duration_ms: int = _MAX_UTTERANCE_MS,
     silence_ms: int = _SILENCE_DURATION_MS,
@@ -361,10 +440,11 @@ async def run_one(
             raise RuntimeError("wake-word mode requires a detector instance")
         print("🎧 Listening for wake word…")
         await _wait_for_wake(detector)
-        print("👂 Heard you — go ahead (you have 6 seconds)")
-        # Fixed-duration recording — simpler and more reliable than VAD.
-        # User gets a guaranteed 6-second window to speak.
-        wav_bytes = _record_ptt(duration_ms=6000)
+        print("👂 Heard you — speak now")
+        # Silero VAD ends recording on end-of-speech (~1.5-3s typical)
+        # instead of a fixed 6-second window. Saves 3+ seconds of wall-
+        # clock wait per turn.
+        wav_bytes = _record_with_vad()
         # Diagnostic: save the last utterance so we can inspect/replay
         # what the mic actually captured when transcription comes back empty.
         _dump_last_utterance(wav_bytes)

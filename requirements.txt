@@ -87,3 +87,4 @@ yarl==1.22.0
 openwakeword
 sounddevice
 soundfile
+silero-vad

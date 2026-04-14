@@ -586,3 +586,179 @@ def _setup_ollama_mock(mock_ollama_cls, outreach_json_str: str):
     mock_ollama.generate = AsyncMock(return_value={"response": outreach_json_str})
     mock_ollama_cls.return_value = mock_ollama
     return mock_ollama, mock_ollama.generate
+
+
+# ─────────────────────────────────────────────
+# R8 — Send mode (context["send"]=True)
+# ─────────────────────────────────────────────
+
+def _make_send_input(task: str = "Find 3 fintech startups in Mumbai") -> AgentInput:
+    return {
+        "task": task,
+        "context": {"send": True},
+        "trace_id": "trace-reach-send",
+        "conversation_id": "conv-reach-send",
+    }
+
+
+def _mock_email_service(send_results=None, send_raises=None):
+    """
+    Build an EmailService mock.
+      send_results: list of return values (one per call), or single dict
+      send_raises:  list of exceptions (one per call), or single exception
+    """
+    svc = MagicMock()
+    if send_raises is not None:
+        if isinstance(send_raises, list):
+            svc.send = AsyncMock(side_effect=send_raises)
+        else:
+            svc.send = AsyncMock(side_effect=send_raises)
+    elif isinstance(send_results, list):
+        svc.send = AsyncMock(side_effect=send_results)
+    else:
+        svc.send = AsyncMock(
+            return_value=send_results or {"sent": True, "message_id": "sg-1"}
+        )
+    return svc
+
+
+from agents.reach.reach_agent import ReachAgent  # noqa: E402
+
+
+@pytest.mark.asyncio
+class TestReachSendMode:
+    async def test_send_true_calls_email_for_each_lead(self):
+        leads = [
+            _lead(name="A", email="a@ama.com"),
+            _lead(name="B", email="b@bma.com"),
+        ]
+        email_svc = _mock_email_service()
+        agent = ReachAgent()
+
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            await agent.process(_make_send_input())
+
+        assert email_svc.send.call_count == 2
+
+    async def test_send_true_uses_lead_email_and_outreach(self):
+        leads = [_lead(name="Rahul", email="rahul@payflow.io")]
+        email_svc = _mock_email_service()
+        agent = ReachAgent()
+
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json(subject="Hi Rahul", body="..."))
+            await agent.process(_make_send_input())
+
+        kwargs = email_svc.send.call_args.kwargs
+        assert kwargs["to"] == "rahul@payflow.io"
+        assert kwargs["subject"] == "Hi Rahul"
+
+    async def test_send_true_returns_requires_approval_false(self):
+        email_svc = _mock_email_service()
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json())
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_send_input())
+        assert result["requires_approval"] is False
+
+    async def test_send_true_result_has_sent_and_failed_counts(self):
+        leads = [_lead(name=f"L{i}", email=f"l{i}@x.com") for i in range(3)]
+        email_svc = _mock_email_service()
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_send_input())
+        assert result["result"]["sent_count"] == 3
+        assert result["result"]["failed_count"] == 0
+
+    async def test_partial_failure_counted_per_lead(self):
+        """One SendGrid failure doesn't abort the run."""
+        leads = [
+            _lead(name="A", email="a@x.com"),
+            _lead(name="B", email="b@x.com"),
+        ]
+        email_svc = _mock_email_service(send_raises=[
+            {"sent": True, "message_id": "sg-ok"},  # first succeeds
+            RuntimeError("SendGrid 500"),           # second fails
+        ])
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_send_input())
+        assert result["success"] is True  # partial failure is non-fatal
+        assert result["result"]["sent_count"] == 1
+        assert result["result"]["failed_count"] == 1
+
+    async def test_lead_without_email_is_skipped(self):
+        leads = [
+            _lead(name="A", email=""),
+            _lead(name="B", email="b@x.com"),
+        ]
+        email_svc = _mock_email_service()
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_send_input())
+        # Only one lead actually emailed
+        assert email_svc.send.call_count == 1
+        # The other is marked skipped (no email)
+        assert result["result"]["sent_count"] == 1
+
+    async def test_each_lead_gets_sent_flag(self):
+        leads = [
+            _lead(name="A", email="a@x.com"),
+            _lead(name="B", email="b@x.com"),
+        ]
+        email_svc = _mock_email_service(send_raises=[
+            {"sent": True, "message_id": "sg-1"},
+            RuntimeError("fail"),
+        ])
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService", return_value=email_svc), \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json(leads))
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_send_input())
+        flags = [lead.get("sent") for lead in result["result"]["leads"]]
+        assert True in flags  # one succeeded
+        assert False in flags  # one failed
+
+    async def test_send_false_is_default_unchanged(self):
+        """Without context.send, REACH behaves exactly as before."""
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.EmailService") as email_cls, \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json())
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            result = await agent.process(_make_input())
+        assert result["requires_approval"] is True
+        email_cls.assert_not_called()

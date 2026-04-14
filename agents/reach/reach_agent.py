@@ -51,6 +51,7 @@ import httpx
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.email import EmailService
 from services.ollama import OllamaService
 
 logger = logging.getLogger("cruz.agents.REACH")
@@ -186,8 +187,79 @@ class ReachAgent(BaseAgent):
             total_tokens += tokens
             enriched_leads.append({**lead, "outreach": outreach})
 
-        # ── Build result ──────────────────────────────────────────────────
         total = len(enriched_leads)
+
+        # ── Send mode: context["send"]=True → send each outreach now ─────
+        if input["context"].get("send") is True:
+            email_svc = EmailService()
+            sent_count = 0
+            failed_count = 0
+            for lead in enriched_leads:
+                outreach = lead.get("outreach")
+                to = (lead.get("email") or "").strip()
+                if not outreach or not to:
+                    # Skip: personalisation failed OR no email on lead
+                    lead["sent"] = False
+                    lead["skip_reason"] = (
+                        "no outreach draft" if not outreach else "no email"
+                    )
+                    continue
+                try:
+                    send_result = await email_svc.send(
+                        to=to,
+                        subject=outreach["subject"],
+                        body=outreach["body"],
+                    )
+                    lead["sent"] = True
+                    lead["message_id"] = send_result.get("message_id", "")
+                    sent_count += 1
+                except Exception as send_exc:
+                    lead["sent"] = False
+                    lead["send_error"] = str(send_exc)
+                    failed_count += 1
+                    logger.warning(
+                        "[%s] REACH send failed for %s: %s",
+                        input["trace_id"], to, send_exc,
+                    )
+
+            result = {
+                "criteria": input["task"],
+                "total": total,
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+                "leads": enriched_leads,
+            }
+
+            duration = int((time.monotonic() - start) * 1000)
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success",
+                    input_data={"task": input["task"], "mode": "send"},
+                    output_data={
+                        "total": total,
+                        "sent_count": sent_count,
+                        "failed_count": failed_count,
+                    },
+                    tokens_used=total_tokens,
+                    duration_ms=duration,
+                )
+            except Exception:
+                pass
+
+            return AgentOutput(
+                success=True,
+                result=result,
+                agent=self.name,
+                duration_ms=duration,
+                tokens_used=total_tokens,
+                error=None,
+                requires_approval=False,
+                approval_prompt=None,
+            )
+
+        # ── Draft-only (default): return approval gate ────────────────────
         result = {
             "criteria": input["task"],
             "total": total,

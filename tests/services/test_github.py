@@ -141,3 +141,148 @@ class TestPostPrReview:
         assert result["posted"] is True
         payload = client.post.call_args.kwargs["json"]
         assert payload["comments"] == []
+
+
+# ---------------------------------------------------------------------------
+# create_or_update_file() — R10 MARK doc publish
+# ---------------------------------------------------------------------------
+
+def _mock_get_response(exists: bool, sha: str = "oldsha123"):
+    resp = MagicMock()
+    resp.status_code = 200 if exists else 404
+    resp.text = "" if exists else "Not Found"
+    resp.json = MagicMock(return_value={"sha": sha} if exists else {})
+    return resp
+
+
+def _mock_put_response(status: int = 201, commit_sha: str = "newsha456", html_url: str = "https://github.com/o/r/blob/main/docs/api.md"):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = "" if status < 300 else "conflict"
+    resp.json = MagicMock(return_value={
+        "content": {"html_url": html_url},
+        "commit": {"sha": commit_sha},
+    })
+    return resp
+
+
+def _patch_httpx_get_put(get_resp, put_resp):
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.get = AsyncMock(return_value=get_resp)
+    client.put = AsyncMock(return_value=put_resp)
+    return patch("services.github.httpx.AsyncClient", return_value=client), client
+
+
+@pytest.mark.asyncio
+class TestCreateOrUpdateFile:
+    async def test_creates_new_file_when_absent(self):
+        """GET returns 404 → PUT without sha."""
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=False)
+        put_r = _mock_put_response(status=201)
+        pc, client = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            await svc.create_or_update_file(
+                owner="o", repo="r",
+                path="docs/api.md",
+                content="# API",
+                message="docs: init",
+            )
+        # PUT called once (create path — no sha in payload)
+        client.put.assert_called_once()
+        payload = client.put.call_args.kwargs["json"]
+        assert "sha" not in payload
+        assert payload["message"] == "docs: init"
+        # content must be base64-encoded
+        import base64
+        assert base64.b64decode(payload["content"]).decode() == "# API"
+
+    async def test_updates_existing_file_includes_sha(self):
+        """GET returns 200 → PUT with existing sha to avoid conflict."""
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=True, sha="existing-sha-abc")
+        put_r = _mock_put_response(status=200)
+        pc, client = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            await svc.create_or_update_file(
+                owner="o", repo="r",
+                path="README.md",
+                content="updated",
+                message="docs: refresh",
+            )
+        payload = client.put.call_args.kwargs["json"]
+        assert payload["sha"] == "existing-sha-abc"
+
+    async def test_default_branch_is_main(self):
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=False)
+        put_r = _mock_put_response()
+        pc, client = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            await svc.create_or_update_file(
+                owner="o", repo="r",
+                path="a.md", content="x", message="m",
+            )
+        payload = client.put.call_args.kwargs["json"]
+        assert payload["branch"] == "main"
+
+    async def test_branch_override(self):
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=False)
+        put_r = _mock_put_response()
+        pc, client = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            await svc.create_or_update_file(
+                owner="o", repo="r",
+                path="a.md", content="x", message="m",
+                branch="docs-update",
+            )
+        assert client.put.call_args.kwargs["json"]["branch"] == "docs-update"
+
+    async def test_returns_published_html_url_and_commit_sha(self):
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=False)
+        put_r = _mock_put_response(
+            status=201,
+            commit_sha="commit123",
+            html_url="https://github.com/o/r/blob/main/a.md",
+        )
+        pc, _ = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            result = await svc.create_or_update_file(
+                owner="o", repo="r",
+                path="a.md", content="x", message="m",
+            )
+        assert result["published"] is True
+        assert result["commit_sha"] == "commit123"
+        assert result["html_url"] == "https://github.com/o/r/blob/main/a.md"
+
+    async def test_raises_when_token_missing(self):
+        from services.github import GitHubService
+        with patch.dict(os.environ, {"GITHUB_TOKEN": ""}, clear=True):
+            svc = GitHubService()
+            with pytest.raises(RuntimeError, match="GITHUB_TOKEN"):
+                await svc.create_or_update_file(
+                    owner="o", repo="r",
+                    path="a.md", content="x", message="m",
+                )
+
+    async def test_raises_when_put_fails(self):
+        from services.github import GitHubService
+        get_r = _mock_get_response(exists=False)
+        put_r = _mock_put_response(status=409)
+        pc, _ = _patch_httpx_get_put(get_r, put_r)
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp"}, clear=False), pc:
+            svc = GitHubService()
+            with pytest.raises(RuntimeError, match="GitHub"):
+                await svc.create_or_update_file(
+                    owner="o", repo="r",
+                    path="a.md", content="x", message="m",
+                )

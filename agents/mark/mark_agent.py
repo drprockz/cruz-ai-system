@@ -31,6 +31,8 @@ import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.github import GitHubService
+from services.notion import NotionService
 from services.ollama import OllamaService
 
 logger = logging.getLogger("cruz.agents.MARK")
@@ -153,12 +155,98 @@ class MarkAgent(BaseAgent):
             )
 
         # ── Build result ──────────────────────────────────────────────────
-        result = {
+        result: Dict[str, Any] = {
             "doc_type": doc_type,
             "content": content,
             "project": project,
         }
 
+        # ── Publish mode: context["send"]=True → push to GitHub / Notion ─
+        ctx = input["context"]
+        if ctx.get("send") is True:
+            target = ctx.get("target", "github")
+            published = {"github": False, "notion": False}
+
+            if target in ("github", "both"):
+                try:
+                    owner, _, repo_name = (ctx.get("repo") or "").partition("/")
+                    gh_result = await GitHubService().create_or_update_file(
+                        owner=owner,
+                        repo=repo_name,
+                        path=ctx.get("path", ""),
+                        content=content,
+                        message=f"docs: MARK publish {doc_type} for {project}",
+                        branch=ctx.get("branch", "main"),
+                    )
+                    published["github"] = True
+                    result["github_url"] = gh_result.get("html_url", "")
+                    result["commit_sha"] = gh_result.get("commit_sha", "")
+                except Exception as gh_exc:
+                    logger.warning(
+                        "[%s] MARK GitHub publish failed: %s",
+                        input["trace_id"], gh_exc,
+                    )
+                    result["github_error"] = str(gh_exc)
+
+            if target in ("notion", "both"):
+                try:
+                    notion_result = await NotionService().create_page(
+                        parent_id=ctx.get("notion_parent_id", ""),
+                        title=f"{project} — {doc_type}",
+                        content=content,
+                    )
+                    published["notion"] = True
+                    result["notion_url"] = notion_result.get("url", "")
+                    result["notion_page_id"] = notion_result.get("page_id", "")
+                except Exception as nt_exc:
+                    logger.warning(
+                        "[%s] MARK Notion publish failed: %s",
+                        input["trace_id"], nt_exc,
+                    )
+                    result["notion_error"] = str(nt_exc)
+
+            result["published"] = published
+            any_success = any(published.values())
+
+            duration = int((time.monotonic() - start) * 1000)
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success" if any_success else "error",
+                    input_data={
+                        "doc_type": doc_type,
+                        "project": project,
+                        "target": target,
+                    },
+                    output_data={"published": published, "chars": len(content)},
+                    tokens_used=tokens_used,
+                    duration_ms=duration,
+                )
+            except Exception:
+                pass
+
+            error_msg = None
+            if not any_success:
+                errs = []
+                if result.get("github_error"):
+                    errs.append(f"GitHub: {result['github_error']}")
+                if result.get("notion_error"):
+                    errs.append(f"Notion: {result['notion_error']}")
+                error_msg = " | ".join(errs) or "Publish failed on all targets"
+
+            return AgentOutput(
+                success=any_success,
+                result=result,
+                agent=self.name,
+                duration_ms=duration,
+                tokens_used=tokens_used,
+                error=error_msg,
+                requires_approval=False,
+                approval_prompt=None,
+            )
+
+        # ── Draft-only (default): approval gate ──────────────────────────
         approval_prompt = (
             f"Publish {doc_type} documentation for '{project}'?\n"
             f"  Characters generated: {len(content)}\n\n"

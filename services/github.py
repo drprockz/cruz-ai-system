@@ -25,9 +25,10 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -100,3 +101,79 @@ class GitHubService:
             owner, repo, pr_number, review_id, len(comments),
         )
         return {"posted": True, "review_id": review_id}
+
+    async def create_or_update_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        content: str,
+        message: str,
+        branch: str = "main",
+    ) -> Dict[str, Any]:
+        """
+        Create a new file, or update it in place if it already exists.
+
+        GitHub's Contents API requires the existing file's SHA when updating.
+        We GET first to discover it; 404 means "create fresh."
+
+        Args:
+            owner, repo: repository identifier
+            path:        file path within the repo (e.g. "docs/api.md")
+            content:     raw text content (base64 encoded for transport)
+            message:     commit message
+            branch:      target branch (default "main")
+
+        Returns {"published": True, "html_url": str, "commit_sha": str}.
+        Raises RuntimeError on missing token or non-2xx on PUT.
+        """
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError(
+                "GITHUB_TOKEN is not set — cannot publish file. "
+                "Set it in .env (requires repo:write scope)."
+            )
+
+        url = f"{_GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        payload: Dict[str, Any] = {
+            "message": message,
+            "content": encoded,
+            "branch": branch,
+        }
+
+        async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+            # 1. Look for existing file to get its sha (needed for update)
+            get_resp = await client.get(url, params={"ref": branch})
+            if get_resp.status_code == 200:
+                existing_sha = get_resp.json().get("sha")
+                if existing_sha:
+                    payload["sha"] = existing_sha
+
+            # 2. PUT creates or updates
+            put_resp = await client.put(url, json=payload)
+
+        if put_resp.status_code >= 300:
+            raise RuntimeError(
+                f"GitHub create_or_update_file failed: "
+                f"HTTP {put_resp.status_code} — {put_resp.text}"
+            )
+
+        data = put_resp.json()
+        html_url = (data.get("content") or {}).get("html_url", "")
+        commit_sha = (data.get("commit") or {}).get("sha", "")
+        logger.info(
+            "GitHub file published: %s/%s/%s on %s commit=%s",
+            owner, repo, path, branch, commit_sha,
+        )
+        return {
+            "published": True,
+            "html_url": html_url,
+            "commit_sha": commit_sha,
+        }

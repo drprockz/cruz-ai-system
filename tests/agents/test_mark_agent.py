@@ -410,3 +410,199 @@ class TestMarkLogging:
                 mock_log.side_effect = Exception("DB dead")
                 result = await agent.process(_make_input())
         assert result["success"] is True
+
+
+# ─────────────────────────────────────────────
+# R10 — Publish mode (context["send"]=True → push to GitHub and/or Notion)
+# ─────────────────────────────────────────────
+
+def _make_publish_input(
+    target: str = "github",
+    doc_type: str = "readme",
+    project: str = "ama-website",
+    repo: str = "drprockz/ama-website",
+    path: str = "README.md",
+    branch: str = "main",
+    notion_parent_id: str = "notion-parent-123",
+) -> AgentInput:
+    ctx: dict = {
+        "doc_type": doc_type,
+        "project": project,
+        "code": _SAMPLE_CODE,
+        "send": True,
+        "target": target,
+    }
+    if target in ("github", "both"):
+        ctx["repo"] = repo
+        ctx["path"] = path
+        ctx["branch"] = branch
+    if target in ("notion", "both"):
+        ctx["notion_parent_id"] = notion_parent_id
+    return {
+        "task": "Publish docs",
+        "context": ctx,
+        "trace_id": "trace-mark-pub",
+        "conversation_id": "conv-mark-pub",
+    }
+
+
+def _mock_github_service(result=None, raises=None):
+    svc = MagicMock()
+    if raises is not None:
+        svc.create_or_update_file = AsyncMock(side_effect=raises)
+    else:
+        svc.create_or_update_file = AsyncMock(
+            return_value=result or {
+                "published": True,
+                "html_url": "https://github.com/o/r/blob/main/README.md",
+                "commit_sha": "abc123",
+            }
+        )
+    return svc
+
+
+def _mock_notion_service(result=None, raises=None):
+    svc = MagicMock()
+    if raises is not None:
+        svc.create_page = AsyncMock(side_effect=raises)
+    else:
+        svc.create_page = AsyncMock(
+            return_value=result or {
+                "created": True,
+                "page_id": "pg-777",
+                "url": "https://notion.so/pg-777",
+            }
+        )
+    return svc
+
+
+@pytest.mark.asyncio
+class TestMarkPublishMode:
+    async def test_github_target_calls_create_or_update_file(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("# README")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            await MarkAgent().process(_make_publish_input(target="github"))
+        gh.create_or_update_file.assert_called_once()
+        kwargs = gh.create_or_update_file.call_args.kwargs
+        assert kwargs["owner"] == "drprockz"
+        assert kwargs["repo"] == "ama-website"
+        assert kwargs["path"] == "README.md"
+        assert kwargs["content"] == "# README"
+
+    async def test_github_target_commit_message_mentions_project_and_doc_type(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            await MarkAgent().process(_make_publish_input(doc_type="readme", project="shooterista"))
+        msg = gh.create_or_update_file.call_args.kwargs["message"]
+        assert "readme" in msg.lower() or "MARK" in msg
+        assert "shooterista" in msg.lower() or "MARK" in msg
+
+    async def test_github_publish_result_has_html_url(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service(result={
+            "published": True,
+            "html_url": "https://github.com/o/r/blob/main/docs.md",
+            "commit_sha": "sha123",
+        })
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="github"))
+        assert result["result"]["published"]["github"] is True
+        assert result["result"]["github_url"] == "https://github.com/o/r/blob/main/docs.md"
+
+    async def test_notion_target_calls_create_page(self):
+        from agents.mark.mark_agent import MarkAgent
+        nt = _mock_notion_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("body")), \
+             patch("agents.mark.mark_agent.NotionService", return_value=nt), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            await MarkAgent().process(_make_publish_input(target="notion"))
+        nt.create_page.assert_called_once()
+        kwargs = nt.create_page.call_args.kwargs
+        assert kwargs["parent_id"] == "notion-parent-123"
+        assert kwargs["content"] == "body"
+
+    async def test_notion_publish_result_has_url(self):
+        from agents.mark.mark_agent import MarkAgent
+        nt = _mock_notion_service(result={
+            "created": True,
+            "page_id": "pg-42",
+            "url": "https://notion.so/pg-42",
+        })
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.NotionService", return_value=nt), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="notion"))
+        assert result["result"]["published"]["notion"] is True
+        assert result["result"]["notion_url"] == "https://notion.so/pg-42"
+
+    async def test_both_target_publishes_to_github_and_notion(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service()
+        nt = _mock_notion_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("body")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.NotionService", return_value=nt), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="both"))
+        gh.create_or_update_file.assert_called_once()
+        nt.create_page.assert_called_once()
+        assert result["result"]["published"]["github"] is True
+        assert result["result"]["published"]["notion"] is True
+
+    async def test_github_failure_is_surfaced_without_aborting_notion(self):
+        """If target=both and github fails, notion still attempted; overall success=False."""
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service(raises=RuntimeError("GitHub 401"))
+        nt = _mock_notion_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.NotionService", return_value=nt), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="both"))
+        nt.create_page.assert_called_once()
+        assert result["result"]["published"]["github"] is False
+        assert result["result"]["published"]["notion"] is True
+        # success reflects partial — at least one target landed
+        assert result["success"] is True
+
+    async def test_both_targets_fail_returns_success_false(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service(raises=RuntimeError("GitHub 500"))
+        nt = _mock_notion_service(raises=RuntimeError("Notion 503"))
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.NotionService", return_value=nt), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="both"))
+        assert result["success"] is False
+        assert result["result"]["published"]["github"] is False
+        assert result["result"]["published"]["notion"] is False
+
+    async def test_publish_returns_requires_approval_false(self):
+        from agents.mark.mark_agent import MarkAgent
+        gh = _mock_github_service()
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama("x")), \
+             patch("agents.mark.mark_agent.GitHubService", return_value=gh), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_publish_input(target="github"))
+        assert result["requires_approval"] is False
+
+    async def test_send_false_is_default_unchanged(self):
+        """Without send=True, MARK still drafts + approval gate."""
+        from agents.mark.mark_agent import MarkAgent
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama()), \
+             patch("agents.mark.mark_agent.GitHubService") as gh_cls, \
+             patch("agents.mark.mark_agent.NotionService") as nt_cls, \
+             patch("agents.mark.mark_agent.get_db_service"):
+            result = await MarkAgent().process(_make_input(doc_type="readme"))
+        assert result["requires_approval"] is True
+        gh_cls.assert_not_called()
+        nt_cls.assert_not_called()

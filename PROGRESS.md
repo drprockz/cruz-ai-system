@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 14, 2026
-**Tests passing:** 832 / 832 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
+**Tests passing:** 883 / 883 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -156,8 +156,8 @@ crashes before responding to any command** because:
 | R9 | ~~SENTINEL never posts GitHub inline comments~~ | ✅ 2026-04-14 — `services/github.py` + `context={"send":True}` posts review via `/pulls/:n/reviews` with inline comments, severity prefixed |
 | R10 | ~~MARK generates docs, never publishes~~ | ✅ 2026-04-14 — `context={"send":True,"target":"github"\|"notion"\|"both"}` publishes via new services |
 | R11 | ~~Notion missing across agents~~ | ✅ 2026-04-14 — `services/notion.py` with `create_page`; chunking past 2000 chars; MARK is first consumer. CATCH/RAW/PULSE can reuse. |
-| R12 | PM supports Plane.so only, not Linear or JIRA | CLAUDE.md says Linear/JIRA |
-| R13 | CATCH doesn't push to Linear (only transcribes + summarises) | Meeting actions not tracked |
+| R12 | PM drafts sprint tickets but **creates nothing anywhere** (audit misread: PM doesn't call Plane.so either) | Needs `services/plane.py` + PM send mode. Stack is Plane.so (not Linear/JIRA per CLAUDE.md legacy spec). |
+| R13 | CATCH transcribes+summarises but doesn't push action items to Plane.so | Same `services/plane.py` — CATCH is second consumer |
 | R14 | TITAN has no auto-rollback on failed deploys | Bad deploy = manual intervention |
 | R15 | QT has no Playwright, no Lighthouse | Only pytest + npm audit |
 | R16 | Voice `speak()` is a stub — no Inworld TTS, no Porcupine wake word | Voice pipeline is STT-only |
@@ -191,8 +191,8 @@ Tackle in client-value order:
 3. ✅ **R9** SENTINEL post GitHub review comments — done 2026-04-14
 4. ✅ **R10** MARK publish to GitHub/Notion — done 2026-04-14
 5. ✅ **R11** Shared Notion service (`services/notion.py`) — done 2026-04-14 (MARK is first consumer; CATCH/RAW/PULSE remain to adopt it in follow-ups)
-6. **R12** PM JIRA/Linear adapter — currently Plane-only
-7. **R13** CATCH push action items to Linear
+6. **R12** PM push tickets to Plane.so (new `services/plane.py`, send mode on PM)
+7. **R13** CATCH push action items to Plane.so (reuse `services/plane.py` from R12)
 8. **R14** TITAN auto-rollback on failed deploy
 9. **R15** QT Playwright + Lighthouse
 10. **R16** VoicePipeline.speak() + Porcupine wake word

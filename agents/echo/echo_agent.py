@@ -26,6 +26,7 @@ import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.email import EmailService
 from services.ollama import OllamaService
 from typing_extensions import TypedDict
 
@@ -119,6 +120,76 @@ class EchoAgent(BaseAgent):
                 approval_prompt=None,
             )
 
+        # ── Send mode: context["send"] is True → skip approval + send now ──
+        if input["context"].get("send") is True:
+            recipient = input["context"].get("to") or draft["to"]
+            try:
+                send_result = await EmailService().send(
+                    to=recipient,
+                    subject=draft["subject"],
+                    body=draft["body"],
+                )
+            except Exception as send_exc:
+                err = str(send_exc)
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"task": input["task"], "mode": "send"},
+                        output_data={"error": err, "draft": dict(draft)},
+                        tokens_used=tokens_used,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+                return AgentOutput(
+                    success=False,
+                    result={**dict(draft), "sent": False, "to": recipient},
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=tokens_used,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+
+            duration = int((time.monotonic() - start) * 1000)
+            try:
+                await self.log(
+                    db=db,
+                    trace_id=input["trace_id"],
+                    status="success",
+                    input_data={"task": input["task"], "mode": "send", "to": recipient},
+                    output_data={
+                        "sent": True,
+                        "message_id": send_result.get("message_id", ""),
+                        "subject": draft["subject"],
+                    },
+                    tokens_used=tokens_used,
+                    duration_ms=duration,
+                )
+            except Exception:
+                pass
+
+            return AgentOutput(
+                success=True,
+                result={
+                    **dict(draft),
+                    "to": recipient,
+                    "sent": True,
+                    "message_id": send_result.get("message_id", ""),
+                },
+                agent=self.name,
+                duration_ms=duration,
+                tokens_used=tokens_used,
+                error=None,
+                requires_approval=False,
+                approval_prompt=None,
+            )
+
+        # ── Draft-only (default): return approval gate ───────────────────
         approval_prompt = (
             f"Send this email?\n"
             f"  To: {draft['to']}\n"

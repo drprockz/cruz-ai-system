@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
 **Last updated:** April 14, 2026
-**Tests passing:** 814 / 814 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
+**Tests passing:** 832 / 832 mocked + 9 real-PostgreSQL integration tests (opt-in via `DATABASE_URL_TEST`)
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -151,7 +151,7 @@ crashes before responding to any command** because:
 
 | # | Gap | Impact |
 |---|---|---|
-| R7 | ECHO drafts emails, never sends (no Gmail/SendGrid call) | Emails get stuck at approval gate |
+| R7 | ~~ECHO drafts emails, never sends~~ | ✅ 2026-04-14 — `services/email.py` (SendGrid); `context={"send":True}` sends after draft. `context["to"]` overrides draft recipient. |
 | R8 | REACH drafts outreach, never sends | Same as R7 |
 | R9 | SENTINEL reviews PRs, never posts GitHub inline comments | Reviews die in memory |
 | R10 | MARK generates docs, never publishes to GitHub/Notion | Output not persisted anywhere |
@@ -186,8 +186,8 @@ crashes before responding to any command** because:
 ### ⏭️ P1 queue (CLAUDE.md promises not yet delivered)
 
 Tackle in client-value order:
-1. **R7** ECHO send email (Gmail/SendGrid after approval) — unblocks first usable feature
-2. **R8** REACH send outreach — complete the lead-gen loop
+1. ✅ **R7** ECHO send email (SendGrid) — done 2026-04-14
+2. **R8** REACH send outreach — complete the lead-gen loop (same EmailService, reuse)
 3. **R9** SENTINEL post GitHub inline comments — completes PR review loop
 4. **R10** MARK publish to GitHub/Notion — closes documentation loop
 5. **R11** Shared Notion service (`services/notion.py`) — used by R7, R10, CATCH, RAW, PULSE

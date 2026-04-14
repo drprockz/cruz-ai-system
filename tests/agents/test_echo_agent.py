@@ -501,3 +501,178 @@ class TestEchoClaudeFallback:
 
         assert result["success"] is False
         assert result["error"] is not None
+
+
+# ─────────────────────────────────────────────
+# R7 — Send mode (context["send"]=True)
+# ─────────────────────────────────────────────
+
+def _make_send_input(
+    task: str = "draft an email to ateet@ama.com about the project delay",
+    send: bool = True,
+    to: str = None,
+) -> AgentInput:
+    ctx = {"send": send}
+    if to is not None:
+        ctx["to"] = to
+    return {
+        "task": task,
+        "context": ctx,
+        "trace_id": "trace-echo-send",
+        "conversation_id": "conv-send",
+    }
+
+
+def _mock_email_service(result=None, raises=None):
+    """Build a mock EmailService.send AsyncMock."""
+    svc = MagicMock()
+    if raises is not None:
+        svc.send = AsyncMock(side_effect=raises)
+    else:
+        svc.send = AsyncMock(return_value=result or {"sent": True, "message_id": "sg-1"})
+    return svc
+
+
+@pytest.mark.asyncio
+class TestEchoSendMode:
+    async def test_send_true_calls_email_service_with_draft(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response(
+                to="ateet@ama.com", subject="Delay update", body="Pushing by 2 days."
+            )
+        )
+        email_svc = _mock_email_service()
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            await agent.process(_make_send_input())
+
+        email_svc.send.assert_called_once()
+        kwargs = email_svc.send.call_args.kwargs
+        assert kwargs["to"] == "ateet@ama.com"
+        assert kwargs["subject"] == "Delay update"
+        assert kwargs["body"] == "Pushing by 2 days."
+
+    async def test_send_true_returns_requires_approval_false(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        email_svc = _mock_email_service()
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            result = await agent.process(_make_send_input())
+
+        assert result["requires_approval"] is False
+
+    async def test_send_true_result_includes_sent_and_message_id(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        email_svc = _mock_email_service(result={"sent": True, "message_id": "sg-xyz"})
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            result = await agent.process(_make_send_input())
+
+        assert result["result"]["sent"] is True
+        assert result["result"]["message_id"] == "sg-xyz"
+
+    async def test_send_failure_returns_success_false(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        email_svc = _mock_email_service(
+            raises=RuntimeError("SendGrid send failed: HTTP 401"),
+        )
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            result = await agent.process(_make_send_input())
+
+        assert result["success"] is False
+        assert "SendGrid" in (result["error"] or "")
+        assert result["requires_approval"] is False
+
+    async def test_context_to_overrides_draft_to(self):
+        """Explicit context['to'] takes precedence over what the LLM chose."""
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response(
+                to="wrong@example.com", subject="s", body="b"
+            )
+        )
+        email_svc = _mock_email_service()
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            await agent.process(
+                _make_send_input(to="ateet@ama.com")
+            )
+
+        kwargs = email_svc.send.call_args.kwargs
+        assert kwargs["to"] == "ateet@ama.com"
+
+    async def test_send_false_is_default_unchanged(self):
+        """Without context['send'], ECHO still drafts + approves (legacy behavior)."""
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        agent = EchoAgent()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService") as email_cls:
+            result = await agent.process(_make_input())
+
+        assert result["requires_approval"] is True
+        email_cls.assert_not_called()  # no EmailService ever instantiated
+
+    async def test_send_logs_sent_status_on_success(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        email_svc = _mock_email_service()
+        agent = EchoAgent()
+        agent.log = AsyncMock()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            await agent.process(_make_send_input())
+
+        agent.log.assert_called_once()
+        assert agent.log.call_args.kwargs["status"] == "success"
+
+    async def test_send_logs_error_status_on_send_failure(self):
+        mock_ollama = MagicMock()
+        mock_ollama.generate = AsyncMock(
+            return_value=_make_ollama_json_response("a@b.com", "s", "b")
+        )
+        email_svc = _mock_email_service(raises=RuntimeError("SendGrid 500"))
+        agent = EchoAgent()
+        agent.log = AsyncMock()
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama), \
+             patch("agents.echo.echo_agent.get_db_service"), \
+             patch("agents.echo.echo_agent.EmailService", return_value=email_svc):
+            await agent.process(_make_send_input())
+
+        agent.log.assert_called_once()
+        assert agent.log.call_args.kwargs["status"] == "error"

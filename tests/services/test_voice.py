@@ -26,6 +26,20 @@ import pytest
 from services.voice import VoicePipeline
 
 
+@pytest.fixture(autouse=True)
+def _reset_voice_pipeline_singletons():
+    """
+    VoicePipeline caches the loaded Whisper model on the CLASS, not the
+    instance. Without this, tests from tests/api/ that mock transcribe/
+    speak leak state into this file's _get_whisper tests.
+    """
+    VoicePipeline._whisper_instance = None
+    VoicePipeline._whisper_runtime = None
+    yield
+    VoicePipeline._whisper_instance = None
+    VoicePipeline._whisper_runtime = None
+
+
 # ─────────────────────────────────────────────
 # Interface
 # ─────────────────────────────────────────────

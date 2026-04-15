@@ -774,7 +774,8 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
         raise HTTPException(status_code=500, detail="LiveKit not configured")
 
     conversation_id = req.conversation_id or str(uuid.uuid4())
-    room = f"cruz-{conversation_id}-{req.device_id}"
+    # `__` as the delimiter — safe against UUID dashes in conversation_id.
+    room = f"cruz__{conversation_id}__{req.device_id}"
 
     token = (
         lkapi.AccessToken(api_key, api_secret)

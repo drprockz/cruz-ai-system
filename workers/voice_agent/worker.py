@@ -200,10 +200,22 @@ async def entrypoint(ctx: Any) -> None:
     room = ctx.room
     logger.info("voice_agent joined room=%s", room.name)
 
-    # room name format: cruz-<conversation_id>-<device_id>
-    parts = room.name.split("-", 2)
-    conversation_id: str = parts[1] if len(parts) > 1 else str(uuid.uuid4())
-    device_id: str = parts[2] if len(parts) > 2 else "unknown"
+    # room name format: cruz__<conversation_id>__<device_id>
+    # `__` delimiter — dash-containing UUIDs aren't ambiguous.
+    parts = room.name.split("__")
+    if len(parts) >= 3 and parts[0] == "cruz":
+        conversation_id: str = parts[1]
+        device_id: str = parts[2]
+    else:
+        # Legacy single-dash format / unexpected room — synthesize fallbacks.
+        conversation_id = str(uuid.uuid4())
+        device_id = "unknown"
+
+    # voice_sessions.conversation_id FKs to conversations(id), so the
+    # conversation row must exist before we can insert the session.
+    from services.conversation import ConversationService
+    conv_svc = ConversationService(db)
+    await conv_svc.get_or_create_conversation(conversation_id)
 
     session_svc = VoiceSessionService(db)
     session_id: str = await session_svc.start(

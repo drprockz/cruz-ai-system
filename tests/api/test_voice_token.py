@@ -16,7 +16,7 @@ def test_voice_token_returns_jwt(monkeypatch):
     r = client.post("/voice/token", json={"device_id": "mac-mini"})
     assert r.status_code == 200, r.text
     j = r.json()
-    assert j["room"].startswith("cruz-")
+    assert j["room"].startswith("cruz__")
     assert j["ws_url"] == "wss://x.livekit.cloud"
     assert len(j["token"].split(".")) == 3  # JWT
     assert "conversation_id" in j
@@ -37,7 +37,7 @@ def test_voice_token_accepts_existing_conversation_id(monkeypatch):
     j = r.json()
     assert j["conversation_id"] == "abc-123"
     assert "abc-123" in j["room"]
-    assert j["room"] == "cruz-abc-123-phone"
+    assert j["room"] == "cruz__abc-123__phone"
 
 
 def test_voice_token_500s_when_livekit_not_configured(monkeypatch):

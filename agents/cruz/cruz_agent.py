@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import anthropic  # kept for legacy tests that patch agents.cruz.cruz_agent.anthropic
@@ -392,10 +393,19 @@ class CruzAgent(BaseAgent):
             # Voice-mode brevity: when the request came from a voice device,
             # append an instruction so CRUZ gives a short, spoken-style reply
             # instead of a multi-paragraph answer with bullet points.
-            system_prompt = _SYSTEM_PROMPT
+            now = datetime.now().astimezone()
+            runtime_context = (
+                f"\n\n## Runtime context (authoritative — use this, ignore any prior replies that contradict it)\n"
+                f"- Current datetime: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}\n"
+                f"- User: Darshan Parmar (freelance full-stack developer)\n"
+                f"- Host: Mac Mini M4, accessed from phone/ipad/thinkpad/mac\n"
+                f"- When asked the time or date, answer directly from the datetime above. "
+                f"Never say you 'can't access real-time data' — this runtime context IS real-time."
+            )
+            system_prompt = _SYSTEM_PROMPT + runtime_context
             max_reply_tokens = 8096
             if device in ("mac_mini", "phone", "ipad"):
-                system_prompt = _SYSTEM_PROMPT + (
+                system_prompt = system_prompt + (
                     "\n\nIMPORTANT: The user is speaking via voice. Your reply will be "
                     "read aloud by a TTS engine. Answer in 1-2 plain sentences, under "
                     "40 words. No bullet points, no markdown, no code blocks, no lists. "
@@ -620,7 +630,16 @@ class CruzAgent(BaseAgent):
             if f:
                 tools = f
 
-        system_prompt = _SYSTEM_PROMPT
+        now = datetime.now().astimezone()
+        runtime_context = (
+            f"\n\n## Runtime context (authoritative — use this, ignore any prior replies that contradict it)\n"
+            f"- Current datetime: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}\n"
+            f"- User: Darshan Parmar (freelance full-stack developer)\n"
+            f"- Host: Mac Mini M4, accessed from phone/ipad/thinkpad/mac\n"
+            f"- When asked the time or date, answer directly from the datetime above. "
+            f"Never say you 'can't access real-time data' — this runtime context IS real-time."
+        )
+        system_prompt = _SYSTEM_PROMPT + runtime_context
         max_reply_tokens = 512 if device in ("mac_mini", "phone", "ipad") else 4096
         if device in ("mac_mini", "phone", "ipad"):
             system_prompt += (

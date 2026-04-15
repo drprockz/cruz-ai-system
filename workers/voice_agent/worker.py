@@ -181,8 +181,20 @@ async def entrypoint(ctx: Any) -> None:
     from agents.cruz.cruz_agent import CruzAgent
     from agents.cruz.stream_events import Done, Text, ToolStart
     from services.db import get_db_service
+    from services.qdrant import get_qdrant_service
     from services.realtime_voice import DeepgramSTT, DeepgramTTS
     from services.voice_sessions import VoiceSessionService
+
+    # livekit-agents runs each job in a fresh subprocess, so shared service
+    # singletons (DB, Qdrant) start unconnected. Connect them here.
+    db = get_db_service()
+    await db.connect()
+    qdrant = get_qdrant_service()
+    try:
+        await qdrant.connect()
+    except Exception as exc:
+        # Semantic memory is non-fatal — degrade gracefully.
+        logger.warning("Qdrant connect failed (continuing without semantic memory): %s", exc)
 
     await ctx.connect()
     room = ctx.room
@@ -193,7 +205,7 @@ async def entrypoint(ctx: Any) -> None:
     conversation_id: str = parts[1] if len(parts) > 1 else str(uuid.uuid4())
     device_id: str = parts[2] if len(parts) > 2 else "unknown"
 
-    session_svc = VoiceSessionService(get_db_service())
+    session_svc = VoiceSessionService(db)
     session_id: str = await session_svc.start(
         conversation_id=conversation_id,
         device_id=device_id,
@@ -257,7 +269,18 @@ async def entrypoint(ctx: Any) -> None:
         await asyncio.gather(_pump_audio_into_stt(), _process_turns())
     finally:
         await stt.close()
-        await session_svc.end(session_id, turns=turns, barges=barges)
+        try:
+            await session_svc.end(session_id, turns=turns, barges=barges)
+        except Exception:
+            logger.exception("voice_session end failed (non-fatal)")
+        try:
+            await db.disconnect()
+        except Exception:
+            pass
+        try:
+            await qdrant.disconnect()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -46,10 +46,33 @@ from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
 from services.embedding import get_embedding_service
+from services.llm.router import chat_stream as llm_chat_stream
+from services.sentence_stream import sentence_stream as _sentence_stream
+from services.llm.stream_events import (
+    TextDeltaEvent, ToolUseEvent, DoneEvent as _LLMDone,
+)
+from agents.cruz.stream_events import (
+    Text, ToolStart, ToolFinish, ApprovalRequired, Done,
+)
 
 logger = logging.getLogger("cruz.agents.CRUZ")
 
 _MODEL = "claude-sonnet-4-6"
+
+# Human-friendly "I'm working on it" phrasing per tool.
+_TOOL_INTRO = {
+    "forge": "Let me write that code.",
+    "echo": "Drafting the message.",
+    "reach": "Finding leads now.",
+    "pm": "Updating tasks.",
+    "catch": "Transcribing that for you.",
+    "qt": "Running tests.",
+    "sentinel": "Reviewing the code.",
+    "titan": "Starting the deploy.",
+    "mark": "Generating the docs.",
+    "raw": "Researching.",
+    "pulse": "Gathering your briefing.",
+}
 
 _SYSTEM_PROMPT = """You are CRUZ, a world-class personal AI assistant — the FRIDAY to a developer's Tony Stark.
 
@@ -557,6 +580,148 @@ class CruzAgent(BaseAgent):
             "conversation_id": conversation_id,
         }
         return await specialist_agent.process(agent_input)
+
+    async def stream_response(
+        self,
+        *,
+        task: str,
+        conversation_id: str,
+        trace_id: str,
+        device: Optional[str] = None,
+    ):
+        """
+        Async iterator for voice + SSE paths. Yields:
+          Text / ToolStart / ToolFinish / ApprovalRequired / Done
+        Persists conversation + semantic memory identically to process().
+        """
+        import time as _time
+        import uuid as _uuid
+        start = _time.monotonic()
+        total_tokens = 0
+
+        db = get_db_service()
+        conv_service = ConversationService(db)
+        await conv_service.get_or_create_conversation(conversation_id)
+        history = await conv_service.load_history(conversation_id)
+
+        sem_service = SemanticMemoryService(
+            get_qdrant_service(), get_embedding_service()
+        )
+        semantic_hits = await sem_service.search_similar(task, limit=10)
+
+        messages: List[Dict[str, Any]] = [
+            *semantic_hits, *history, {"role": "user", "content": task},
+        ]
+
+        tools = CRUZ_TOOLS
+        hint = classify(task)
+        if hint:
+            f = [t for t in CRUZ_TOOLS if t["name"] == hint]
+            if f:
+                tools = f
+
+        system_prompt = _SYSTEM_PROMPT
+        max_reply_tokens = 512 if device in ("mac_mini", "phone", "ipad") else 4096
+        if device in ("mac_mini", "phone", "ipad"):
+            system_prompt += (
+                "\n\nIMPORTANT: Voice mode — reply in 1-2 plain sentences under 40 words. "
+                "No markdown, no lists."
+            )
+
+        # Buffer all sentences for persistence + faithful history rebuild.
+        final_text_parts: List[str] = []
+
+        while True:
+            pending_tools: List[ToolUseEvent] = []
+            turn_text_parts: List[str] = []
+
+            async def _text_token_stream():
+                nonlocal total_tokens
+                async for ev in llm_chat_stream(
+                    system=system_prompt, messages=messages,
+                    tools=tools, max_tokens=max_reply_tokens,
+                ):
+                    if isinstance(ev, TextDeltaEvent):
+                        turn_text_parts.append(ev.delta)
+                        yield ev.delta
+                    elif isinstance(ev, ToolUseEvent):
+                        pending_tools.append(ev)
+                    elif isinstance(ev, _LLMDone):
+                        total_tokens += ev.usage.input_tokens + ev.usage.output_tokens
+
+            async for sentence in _sentence_stream(_text_token_stream()):
+                final_text_parts.append(sentence)
+                yield Text(content=sentence)
+
+            if not pending_tools:
+                break
+
+            # Dispatch tools
+            tool_result_blocks = []
+            for tu in pending_tools:
+                yield ToolStart(
+                    agent=tu.name,
+                    summary=_TOOL_INTRO.get(tu.name, f"Running {tu.name}."),
+                )
+                out = await self._dispatch_tool(
+                    tool_name=tu.name, tool_input=tu.input,
+                    trace_id=trace_id, conversation_id=conversation_id,
+                )
+                if out.get("requires_approval"):
+                    yield ApprovalRequired(
+                        agent=tu.name,
+                        prompt=out.get("approval_prompt") or "",
+                        payload=tu.input,
+                    )
+                    yield Done(
+                        tokens_used=total_tokens,
+                        duration_ms=int((_time.monotonic() - start) * 1000),
+                    )
+                    return
+                tool_result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.tool_use_id,
+                    "content": str(out.get("result", "")),
+                })
+                yield ToolFinish(
+                    agent=tu.name,
+                    result_preview=str(out.get("result", ""))[:200],
+                )
+
+            # Reconstruct assistant turn (include any pre-tool text)
+            assistant_content: List[Dict[str, Any]] = []
+            joined_turn_text = "".join(turn_text_parts).strip()
+            if joined_turn_text:
+                assistant_content.append({"type": "text", "text": joined_turn_text})
+            for tu in pending_tools:
+                assistant_content.append({
+                    "type": "tool_use", "id": tu.tool_use_id,
+                    "name": tu.name, "input": tu.input,
+                })
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": tool_result_blocks})
+
+        # Persist — matches process() parity
+        final_text = " ".join(final_text_parts).strip()
+        if final_text:
+            await conv_service.save_exchange(
+                conversation_id=conversation_id,
+                user_task=task,
+                assistant_result=final_text,
+            )
+            await sem_service.store(
+                id=str(_uuid.uuid4()), role="user",
+                content=task, conversation_id=conversation_id,
+            )
+            await sem_service.store(
+                id=str(_uuid.uuid4()), role="assistant",
+                content=final_text, conversation_id=conversation_id,
+            )
+
+        yield Done(
+            tokens_used=total_tokens,
+            duration_ms=int((_time.monotonic() - start) * 1000),
+        )
 
 
 def _extract_text(content: List[Any]) -> str:

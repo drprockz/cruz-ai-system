@@ -38,7 +38,17 @@ from services.redis_client import get_redis_service   # noqa: E402
 from services.alerts import install_loki_logging      # noqa: E402
 from services.voice import VoicePipeline              # noqa: E402
 
-load_dotenv()
+# Don't load .env under pytest — test fixtures use monkeypatch and conftest
+# sets ENVIRONMENT=test; reloading .env would clobber monkeypatched vars.
+if os.environ.get("ENVIRONMENT") != "test":
+    from dotenv import dotenv_values
+
+    load_dotenv(override=False)
+    # Fill empty shell-exported vars with their .env value (protects against
+    # shell configs that export `KEY=""` for required secrets).
+    for _k, _v in dotenv_values().items():
+        if _v and not os.environ.get(_k, "").strip():
+            os.environ[_k] = _v
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -367,34 +377,47 @@ async def _sse_stream(
     conversation_id: str,
 ) -> AsyncGenerator[str, None]:
     """
-    Run CruzAgent and yield SSE events.
+    Run CruzAgent.stream_response and yield SSE events.
 
     Events emitted (in order):
-      - text              — agent's result text
-      - approval_required — when requires_approval=True
-      - error             — when success=False
+      - text              — one full sentence, ready for TTS
+      - tool_start        — a specialist agent has been invoked
+      - tool_finish       — specialist returned a result
+      - approval_required — when requires_approval=True (stream ends after)
+      - error             — when an exception is raised
       - done              — always last, carries trace_id + conversation_id
     """
-    output = await agent.process(agent_input)
-
-    if not output["success"]:
-        yield _sse_event({"type": "error", "error": output["error"]})
-    elif output["requires_approval"]:
-        yield _sse_event({
-            "type": "approval_required",
-            "approval_prompt": output["approval_prompt"],
-            "result": output["result"],
-        })
-    else:
-        yield _sse_event({"type": "text", "content": output["result"]})
-
-    yield _sse_event({
-        "type": "done",
-        "trace_id": trace_id,
-        "conversation_id": conversation_id,
-        "agent": output["agent"],
-        "tokens_used": output["tokens_used"],
-    })
+    from agents.cruz.stream_events import (
+        Text, ToolStart, ToolFinish, ApprovalRequired, Done,
+    )
+    try:
+        async for ev in agent.stream_response(
+            task=agent_input["task"],
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            device=agent_input["context"].get("device"),
+        ):
+            if isinstance(ev, Text):
+                yield _sse_event({"type": "text", "content": ev.content})
+            elif isinstance(ev, ToolStart):
+                yield _sse_event({"type": "tool_start", "agent": ev.agent, "summary": ev.summary})
+            elif isinstance(ev, ToolFinish):
+                yield _sse_event({"type": "tool_finish", "agent": ev.agent, "result": ev.result_preview})
+            elif isinstance(ev, ApprovalRequired):
+                yield _sse_event({
+                    "type": "approval_required", "agent": ev.agent,
+                    "approval_prompt": ev.prompt,
+                })
+            elif isinstance(ev, Done):
+                yield _sse_event({
+                    "type": "done", "trace_id": trace_id,
+                    "conversation_id": conversation_id,
+                    "tokens_used": ev.tokens_used,
+                })
+    except Exception as exc:
+        yield _sse_event({"type": "error", "error": str(exc)})
+        yield _sse_event({"type": "done", "trace_id": trace_id,
+                          "conversation_id": conversation_id})
 
 
 @app.post("/command")
@@ -717,6 +740,66 @@ async def webhook_google_calendar(request: Request) -> JSONResponse:
     pool = await get_arq_pool()
     await pool.enqueue_job("process_google_calendar_webhook", headers)
     return JSONResponse(status_code=200, content={"queued": True})
+
+
+# ---------------------------------------------------------------------------
+# POST /voice/token — mint a short-lived LiveKit JWT for a voice session
+# ---------------------------------------------------------------------------
+
+class VoiceTokenRequest(BaseModel):
+    device_id: str
+    conversation_id: Optional[str] = None
+
+
+@app.post("/voice/token")
+async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
+    """
+    Mint a short-lived LiveKit JWT for a voice session.
+
+    Creates (or re-uses) a conversation_id and room name of the form
+    ``cruz-<conversation_id>-<device_id>``, then signs a 15-minute JWT
+    that grants publish + subscribe rights on that room.
+
+    200  — {"room", "token", "ws_url", "conversation_id"}
+    500  — LiveKit env vars not configured
+    """
+    import datetime
+
+    from livekit import api as lkapi  # lazy import — only needed at call time
+
+    api_key = os.environ.get("LIVEKIT_API_KEY", "")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
+    ws_url = os.environ.get("LIVEKIT_URL") or os.environ.get("LIVEKIT_WS_URL") or ""
+    if not (api_key and api_secret and ws_url):
+        raise HTTPException(status_code=500, detail="LiveKit not configured")
+
+    conversation_id = req.conversation_id or str(uuid.uuid4())
+    room = f"cruz-{conversation_id}-{req.device_id}"
+
+    token = (
+        lkapi.AccessToken(api_key, api_secret)
+        .with_identity(req.device_id)
+        .with_name(req.device_id)
+        .with_grants(
+            lkapi.VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=True,
+                can_subscribe=True,
+            )
+        )
+        .with_ttl(datetime.timedelta(minutes=15))
+        .to_jwt()
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "room": room,
+            "token": token,
+            "ws_url": ws_url,
+            "conversation_id": conversation_id,
+        },
+    )
 
 
 if __name__ == "__main__":

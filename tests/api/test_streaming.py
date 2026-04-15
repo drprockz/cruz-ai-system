@@ -55,9 +55,36 @@ def _make_output(
 
 
 def _patch_cruz(output: AgentOutput):
-    """Context manager: replace CruzAgent with a mock returning `output`."""
+    """Context manager: replace CruzAgent with a mock returning `output`.
+
+    Mocks both process() (JSON path) and stream_response() (SSE path) so
+    existing tests remain valid after the SSE endpoint was rewired to use
+    stream_response instead of process.
+    """
+    from agents.cruz.stream_events import Text, ApprovalRequired, Done
+
+    async def _fake_stream_response(self=None, *, task=None, conversation_id=None,
+                                    trace_id=None, device=None):
+        if not output["success"]:
+            # error path — just yield Done; the exception handler in _sse_stream
+            # is triggered when stream_response raises, but here we model the
+            # case where the agent simply returned success=False on the JSON path.
+            # For SSE we yield a Done event (error is surfaced via exception below).
+            raise RuntimeError(output.get("error") or "agent error")
+        if output["requires_approval"]:
+            yield ApprovalRequired(
+                agent="CRUZ",
+                prompt=output.get("approval_prompt") or "",
+                payload={},
+            )
+        else:
+            if output["result"]:
+                yield Text(content=output["result"])
+        yield Done(tokens_used=output["tokens_used"], duration_ms=output["duration_ms"])
+
     mock_instance = AsyncMock()
     mock_instance.process = AsyncMock(return_value=output)
+    mock_instance.stream_response = _fake_stream_response
 
     patcher_cruz = patch("main.CruzAgent", return_value=mock_instance)
     return patcher_cruz
@@ -291,3 +318,33 @@ class TestNonStreamingRegression:
             client = TestClient(app)
             resp = client.post("/command", json={"command": "send email"})
         assert resp.status_code == 202
+
+
+# ---------------------------------------------------------------------------
+# Added for Phase 1 voice pipeline — per-sentence SSE events
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_sse_emits_text_events_per_sentence(monkeypatch):
+    from agents.cruz.stream_events import Text, Done
+
+    async def _fake_stream(self, *, task, conversation_id, trace_id, device=None):
+        yield Text(content="Deploying AMA now.")
+        yield Text(content="Tests passing.")
+        yield Done(tokens_used=42, duration_ms=900)
+
+    monkeypatch.setattr(
+        "agents.cruz.cruz_agent.CruzAgent.stream_response", _fake_stream,
+    )
+
+    from backend.api.main import app
+    client = TestClient(app)
+    r = client.post(
+        "/command",
+        json={"command": "deploy", "stream": True, "device": "mac_mini"},
+    )
+    body = r.text
+    assert '"type": "text"' in body
+    assert "Deploying AMA now." in body
+    assert "Tests passing." in body
+    assert '"type": "done"' in body

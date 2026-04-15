@@ -25,7 +25,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from services.llm.anthropic_backend import anthropic_chat
+from services.llm.anthropic_backend import anthropic_chat, anthropic_chat_stream
 from services.llm.gemini_backend import gemini_chat
 from services.llm.ollama_backend import ollama_chat
 
@@ -79,3 +79,27 @@ async def chat(
         )
     # Unreachable — _resolve_backend raises for unknown names
     raise RuntimeError(f"router fell through for backend={resolved!r}")
+
+
+async def chat_stream(
+    system: str,
+    messages: List[Dict[str, Any]],
+    max_tokens: int = 4096,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+):
+    """
+    Streaming counterpart to `chat`. Phase 1: anthropic-only.
+    Yields TextDeltaEvent / ToolUseEvent / DoneEvent (see stream_events.py).
+    """
+    resolved = _resolve_backend(backend)
+    if resolved != "anthropic":
+        raise NotImplementedError(
+            f"Streaming only supported on anthropic backend for now (got {resolved}). "
+            "Fall back to blocking chat() for others."
+        )
+    async for ev in anthropic_chat_stream(
+        system=system, messages=messages, max_tokens=max_tokens, tools=tools, model=model,
+    ):
+        yield ev

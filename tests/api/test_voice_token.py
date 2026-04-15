@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 def test_voice_token_returns_jwt(monkeypatch):
     monkeypatch.setenv("LIVEKIT_API_KEY", "key")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "s" * 32)
+    monkeypatch.delenv("LIVEKIT_URL", raising=False)
     monkeypatch.setenv("LIVEKIT_WS_URL", "wss://x.livekit.cloud")
 
     from backend.api.main import app
@@ -24,6 +25,7 @@ def test_voice_token_returns_jwt(monkeypatch):
 def test_voice_token_accepts_existing_conversation_id(monkeypatch):
     monkeypatch.setenv("LIVEKIT_API_KEY", "key")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "s" * 32)
+    monkeypatch.delenv("LIVEKIT_URL", raising=False)
     monkeypatch.setenv("LIVEKIT_WS_URL", "wss://x.livekit.cloud")
     from backend.api.main import app
     client = TestClient(app)

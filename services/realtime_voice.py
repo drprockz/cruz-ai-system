@@ -62,7 +62,9 @@ class DeepgramSTT:
     async def connect(self) -> None:
         self._conn = _deepgram_live_connection()
 
-        async def _on_transcript(_self: object, result: object) -> None:
+        async def _on_transcript(_self: object, result: object, **kwargs) -> None:
+            # deepgram-sdk 3.11 calls callbacks with (client, result, **kwargs)
+            # — accept kwargs so the SDK doesn't raise on extra keyword args.
             try:
                 alt = result.channel.alternatives[0]  # type: ignore[union-attr]
                 text = (alt.transcript or "").strip()
@@ -76,15 +78,29 @@ class DeepgramSTT:
 
         self._conn.on(self._conn._TRANSCRIPT_EVENT, _on_transcript)  # type: ignore[union-attr]
 
-        opts = {
-            "model": self._model,
-            "encoding": "linear16",
-            "sample_rate": 16000,
-            "channels": 1,
-            "interim_results": True,
-            "punctuate": True,
-            "endpointing": self._endpointing_ms,
-        }
+        try:
+            from deepgram import LiveOptions  # type: ignore
+            opts = LiveOptions(
+                model=self._model,
+                language="en-US",
+                encoding="linear16",
+                sample_rate=16000,
+                channels=1,
+                interim_results=True,
+                punctuate=True,
+                endpointing=self._endpointing_ms,
+            )
+        except ImportError:
+            # Test-only path — the fake SDK passes a dict through.
+            opts = {  # type: ignore[assignment]
+                "model": self._model,
+                "encoding": "linear16",
+                "sample_rate": 16000,
+                "channels": 1,
+                "interim_results": True,
+                "punctuate": True,
+                "endpointing": self._endpointing_ms,
+            }
         started = await self._conn.start(opts)  # type: ignore[union-attr]
         if not started:
             raise RuntimeError("DeepgramSTT: failed to start WS")
@@ -93,6 +109,19 @@ class DeepgramSTT:
         if self._conn is None or self._closed:
             raise RuntimeError("STT not connected")
         await self._conn.send(audio_bytes)  # type: ignore[union-attr]
+
+    async def finalize(self) -> None:
+        """Force Deepgram to emit a final transcript for all audio sent so far.
+
+        Use after you've sent the last audio chunk for a turn but want the
+        final transcript without closing the WS.
+        """
+        if self._conn is None or self._closed:
+            return
+        try:
+            await self._conn.finalize()  # type: ignore[union-attr]
+        except Exception:
+            logger.exception("DeepgramSTT finalize failed")
 
     async def transcripts(self) -> AsyncIterator[STTTranscript]:
         while not self._closed:

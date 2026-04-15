@@ -9,6 +9,7 @@ from workers.voice_agent.worker import VoiceAgentConfig
 
 
 def test_config_defaults_from_env(monkeypatch):
+    monkeypatch.delenv("LIVEKIT_URL", raising=False)
     monkeypatch.setenv("LIVEKIT_WS_URL", "wss://x")
     monkeypatch.setenv("LIVEKIT_API_KEY", "k")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "s" * 32)

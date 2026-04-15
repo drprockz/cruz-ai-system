@@ -34,7 +34,7 @@ class VoiceAgentConfig:
     @classmethod
     def from_env(cls) -> "VoiceAgentConfig":
         return cls(
-            ws_url=os.environ["LIVEKIT_WS_URL"],
+            ws_url=os.environ.get("LIVEKIT_URL") or os.environ["LIVEKIT_WS_URL"],
             api_key=os.environ["LIVEKIT_API_KEY"],
             api_secret=os.environ["LIVEKIT_API_SECRET"],
         )

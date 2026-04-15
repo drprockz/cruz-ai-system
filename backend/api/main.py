@@ -38,7 +38,17 @@ from services.redis_client import get_redis_service   # noqa: E402
 from services.alerts import install_loki_logging      # noqa: E402
 from services.voice import VoicePipeline              # noqa: E402
 
-load_dotenv()
+# Don't load .env under pytest — test fixtures use monkeypatch and conftest
+# sets ENVIRONMENT=test; reloading .env would clobber monkeypatched vars.
+if os.environ.get("ENVIRONMENT") != "test":
+    from dotenv import dotenv_values
+
+    load_dotenv(override=False)
+    # Fill empty shell-exported vars with their .env value (protects against
+    # shell configs that export `KEY=""` for required secrets).
+    for _k, _v in dotenv_values().items():
+        if _v and not os.environ.get(_k, "").strip():
+            os.environ[_k] = _v
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -759,7 +769,7 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
 
     api_key = os.environ.get("LIVEKIT_API_KEY", "")
     api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
-    ws_url = os.environ.get("LIVEKIT_WS_URL", "")
+    ws_url = os.environ.get("LIVEKIT_URL") or os.environ.get("LIVEKIT_WS_URL") or ""
     if not (api_key and api_secret and ws_url):
         raise HTTPException(status_code=500, detail="LiveKit not configured")
 

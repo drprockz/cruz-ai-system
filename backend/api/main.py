@@ -367,34 +367,47 @@ async def _sse_stream(
     conversation_id: str,
 ) -> AsyncGenerator[str, None]:
     """
-    Run CruzAgent and yield SSE events.
+    Run CruzAgent.stream_response and yield SSE events.
 
     Events emitted (in order):
-      - text              — agent's result text
-      - approval_required — when requires_approval=True
-      - error             — when success=False
+      - text              — one full sentence, ready for TTS
+      - tool_start        — a specialist agent has been invoked
+      - tool_finish       — specialist returned a result
+      - approval_required — when requires_approval=True (stream ends after)
+      - error             — when an exception is raised
       - done              — always last, carries trace_id + conversation_id
     """
-    output = await agent.process(agent_input)
-
-    if not output["success"]:
-        yield _sse_event({"type": "error", "error": output["error"]})
-    elif output["requires_approval"]:
-        yield _sse_event({
-            "type": "approval_required",
-            "approval_prompt": output["approval_prompt"],
-            "result": output["result"],
-        })
-    else:
-        yield _sse_event({"type": "text", "content": output["result"]})
-
-    yield _sse_event({
-        "type": "done",
-        "trace_id": trace_id,
-        "conversation_id": conversation_id,
-        "agent": output["agent"],
-        "tokens_used": output["tokens_used"],
-    })
+    from agents.cruz.stream_events import (
+        Text, ToolStart, ToolFinish, ApprovalRequired, Done,
+    )
+    try:
+        async for ev in agent.stream_response(
+            task=agent_input["task"],
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            device=agent_input["context"].get("device"),
+        ):
+            if isinstance(ev, Text):
+                yield _sse_event({"type": "text", "content": ev.content})
+            elif isinstance(ev, ToolStart):
+                yield _sse_event({"type": "tool_start", "agent": ev.agent, "summary": ev.summary})
+            elif isinstance(ev, ToolFinish):
+                yield _sse_event({"type": "tool_finish", "agent": ev.agent, "result": ev.result_preview})
+            elif isinstance(ev, ApprovalRequired):
+                yield _sse_event({
+                    "type": "approval_required", "agent": ev.agent,
+                    "approval_prompt": ev.prompt,
+                })
+            elif isinstance(ev, Done):
+                yield _sse_event({
+                    "type": "done", "trace_id": trace_id,
+                    "conversation_id": conversation_id,
+                    "tokens_used": ev.tokens_used,
+                })
+    except Exception as exc:
+        yield _sse_event({"type": "error", "error": str(exc)})
+        yield _sse_event({"type": "done", "trace_id": trace_id,
+                          "conversation_id": conversation_id})
 
 
 @app.post("/command")

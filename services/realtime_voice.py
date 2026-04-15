@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
+import httpx
+
 logger = logging.getLogger("cruz.services.realtime_voice")
 
 
@@ -108,3 +110,65 @@ class DeepgramSTT:
             except Exception:
                 pass
             self._conn = None
+
+
+# ── Aura-2 Orion streaming TTS ──────────────────────────────────
+
+
+class DeepgramTTS:
+    """
+    HTTP-streaming TTS (Aura-2 Orion by default). Deepgram's /v1/speak
+    endpoint returns audio progressively — we yield chunks as they
+    arrive so the caller can start playback before the whole sentence
+    synthesises (~100ms TTFB in practice).
+
+    Deepgram also offers a WebSocket TTS variant. HTTP streaming is
+    sufficient for Phase 1 and simpler to wrap. If observed TTFB
+    exceeds SLO in Phase 3 benchmarks, swap to WS.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: Optional[str] = None,
+        encoding: str = "linear16",
+        sample_rate: int = 24000,
+    ) -> None:
+        self._model = model or os.environ.get(
+            "DEEPGRAM_TTS_MODEL", "aura-2-orion-en"
+        )
+        self._encoding = encoding
+        self._sample_rate = sample_rate
+
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        api_key = os.environ["DEEPGRAM_API_KEY"]
+        params = {
+            "model": self._model,
+            "encoding": self._encoding,
+            "sample_rate": str(self._sample_rate),
+            "container": "none",
+        }
+        headers = {
+            "Authorization": f"Token {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {"text": text}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream(
+                "POST",
+                "https://api.deepgram.com/v1/speak",
+                params=params, headers=headers, json=payload,
+            ) as resp:
+                if resp.status_code >= 300:
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"DeepgramTTS HTTP {resp.status_code}: {body[:200]!r}"
+                    )
+                async for chunk in resp.aiter_bytes(chunk_size=4096):
+                    if chunk:
+                        yield chunk
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate

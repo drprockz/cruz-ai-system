@@ -128,6 +128,52 @@ async def _speak(
         await source.capture_frame(frame)
 
 
+async def _speak_with_fallback(
+    text: str,
+    tts: Any,
+    source: Any,
+    cancel: asyncio.Event,
+) -> None:
+    """
+    Try DeepgramTTS; on failure, fall back to services.voice.VoicePipeline
+    (Inworld → macOS say chain). Inworld returns MP3; we transcode to PCM
+    via ffmpeg so LiveKit can consume it.
+    """
+    try:
+        await _speak(text, tts, source, cancel)
+        return
+    except Exception as exc:
+        logger.warning("DeepgramTTS failed, falling back to Inworld: %s", exc)
+
+    import subprocess
+    import tempfile
+
+    from livekit import rtc  # type: ignore
+
+    from services.voice import VoicePipeline
+
+    audio = await VoicePipeline().speak(text)  # MP3 or AIFF bytes
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as mp3:
+        mp3.write(audio)
+        mp3_path = mp3.name
+    try:
+        pcm = subprocess.check_output([
+            "ffmpeg", "-i", mp3_path, "-f", "s16le",
+            "-ar", str(tts.sample_rate), "-ac", "1",
+            "-loglevel", "error", "pipe:1",
+        ])
+    finally:
+        os.unlink(mp3_path)
+
+    frame = rtc.AudioFrame(
+        data=pcm,
+        sample_rate=tts.sample_rate,
+        num_channels=1,
+        samples_per_channel=len(pcm) // 2,
+    )
+    await source.capture_frame(frame)
+
+
 async def entrypoint(ctx: Any) -> None:
     """Called by the LiveKit agent harness for each new room."""
     from livekit import rtc  # type: ignore
@@ -193,7 +239,7 @@ async def entrypoint(ctx: Any) -> None:
                     text = ev.content if isinstance(ev, Text) else ev.summary
                     speaking["active"] = True
                     try:
-                        await _speak(text, tts, audio_source, tts_cancel)
+                        await _speak_with_fallback(text, tts, audio_source, tts_cancel)
                     finally:
                         speaking["active"] = False
                     if tts_cancel.is_set():

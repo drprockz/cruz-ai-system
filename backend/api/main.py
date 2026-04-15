@@ -732,6 +732,66 @@ async def webhook_google_calendar(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"queued": True})
 
 
+# ---------------------------------------------------------------------------
+# POST /voice/token — mint a short-lived LiveKit JWT for a voice session
+# ---------------------------------------------------------------------------
+
+class VoiceTokenRequest(BaseModel):
+    device_id: str
+    conversation_id: Optional[str] = None
+
+
+@app.post("/voice/token")
+async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
+    """
+    Mint a short-lived LiveKit JWT for a voice session.
+
+    Creates (or re-uses) a conversation_id and room name of the form
+    ``cruz-<conversation_id>-<device_id>``, then signs a 15-minute JWT
+    that grants publish + subscribe rights on that room.
+
+    200  — {"room", "token", "ws_url", "conversation_id"}
+    500  — LiveKit env vars not configured
+    """
+    import datetime
+
+    from livekit import api as lkapi  # lazy import — only needed at call time
+
+    api_key = os.environ.get("LIVEKIT_API_KEY", "")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
+    ws_url = os.environ.get("LIVEKIT_WS_URL", "")
+    if not (api_key and api_secret and ws_url):
+        raise HTTPException(status_code=500, detail="LiveKit not configured")
+
+    conversation_id = req.conversation_id or str(uuid.uuid4())
+    room = f"cruz-{conversation_id}-{req.device_id}"
+
+    token = (
+        lkapi.AccessToken(api_key, api_secret)
+        .with_identity(req.device_id)
+        .with_name(req.device_id)
+        .with_grants(
+            lkapi.VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=True,
+                can_subscribe=True,
+            )
+        )
+        .with_ttl(datetime.timedelta(minutes=15))
+        .to_jwt()
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "room": room,
+            "token": token,
+            "ws_url": ws_url,
+            "conversation_id": conversation_id,
+        },
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
 

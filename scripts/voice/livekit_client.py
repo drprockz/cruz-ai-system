@@ -83,7 +83,9 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
 
     room.on("track_subscribed", on_track_sub)
 
-    detector = WakeWordDetector(keyword="hey_jarvis")
+    wake_threshold = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
+    logger.info("wake_word threshold=%.2f (override with WAKE_WORD_THRESHOLD env)", wake_threshold)
+    detector = WakeWordDetector(keyword="hey_jarvis", threshold=wake_threshold)
     last_unmute = 0.0
 
     # Diagnostics — every ~2s report mic activity + current wake score so the
@@ -115,6 +117,10 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
                     detected = bool(scores)
             except Exception:
                 detected = detector.detect(samples)
+
+            # Log every meaningful score so user can see how close detection gets.
+            if debug_voice and top_score > 0.05:
+                logger.info("wake score=%.3f (rms=%.0f)", top_score, rms)
 
             if detected:
                 mic_track.unmute()

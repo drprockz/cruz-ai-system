@@ -86,13 +86,41 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
     detector = WakeWordDetector(keyword="hey_jarvis")
     last_unmute = 0.0
 
+    # Diagnostics — every ~2s report mic activity + current wake score so the
+    # user can tell whether the mic is even firing.
+    debug: dict = {"frames": 0, "max_rms": 0, "max_score": 0.0, "last_log": 0.0}
+    # Debug threshold: log every detection attempt (score) with DEBUG_VOICE=1
+    debug_voice = os.environ.get("DEBUG_VOICE") == "1"
+
     def _audio_cb(indata, frames, time_, status):
         nonlocal last_unmute
+        # RMS over this frame — 0 means silent, >500 means speech-ish
+        import numpy as _np
+        samples = indata[:, 0]
+        rms = float(_np.sqrt(_np.mean(samples.astype(_np.float32) ** 2)))
+        debug["frames"] += 1
+        if rms > debug["max_rms"]:
+            debug["max_rms"] = rms
+
         if mic_track.muted:
-            if detector.detect(indata[:, 0]):
+            # Run wake detector on every frame (must be 1280 int16 for openWakeWord)
+            try:
+                scores = detector._oww_model.predict(samples)  # raw dict
+                if isinstance(scores, dict):
+                    top_score = max(scores.values(), default=0.0)
+                    if top_score > debug["max_score"]:
+                        debug["max_score"] = top_score
+                    detected = top_score >= detector._threshold
+                else:
+                    detected = bool(scores)
+            except Exception:
+                detected = detector.detect(samples)
+
+            if detected:
                 mic_track.unmute()
                 last_unmute = loop.time()
-                logger.info("wake word detected — mic unmuted")
+                logger.info("wake word detected — mic unmuted (score=%.2f)", debug["max_score"])
+                debug["max_score"] = 0.0
         frame = rtc.AudioFrame(
             data=indata.tobytes(), sample_rate=SAMPLE_RATE,
             num_channels=1, samples_per_channel=frames,
@@ -106,7 +134,15 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
         blocksize=WAKE_WORD_FRAME, callback=_audio_cb,
     ):
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
+            # Periodic heartbeat so silence isn't mistaken for a dead daemon
+            logger.info(
+                "listening: frames=%d max_rms=%.0f max_wake_score=%.3f (threshold=0.5) muted=%s",
+                debug["frames"], debug["max_rms"], debug["max_score"], mic_track.muted,
+            )
+            debug["frames"] = 0
+            debug["max_rms"] = 0
+            debug["max_score"] = 0.0
             if (
                 not mic_track.muted
                 and loop.time() - last_unmute > SILENCE_SECONDS_TO_MUTE

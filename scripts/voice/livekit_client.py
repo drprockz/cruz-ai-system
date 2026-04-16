@@ -57,7 +57,12 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
     mic_source = rtc.AudioSource(sample_rate=SAMPLE_RATE, num_channels=1)
     mic_track = rtc.LocalAudioTrack.create_audio_track("mic", mic_source)
     await room.local_participant.publish_track(mic_track)
-    mic_track.mute()  # start muted; wake-word loop unmutes on detection
+    skip_wake_word = os.environ.get("SKIP_WAKE_WORD") == "1"
+    if skip_wake_word:
+        logger.info("SKIP_WAKE_WORD=1 — mic stays unmuted, no wake detection")
+        # mic_track stays unmuted (default state after publish)
+    else:
+        mic_track.mute()  # start muted; wake-word loop unmutes on detection
 
     loop = asyncio.get_running_loop()
 
@@ -83,7 +88,9 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
 
     room.on("track_subscribed", on_track_sub)
 
-    wake_threshold = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.5"))
+    # Default 0.4 — real-world mics (Brio 100, AirPods) peak around 0.4-0.5
+    # on clear speech. 0.5 was too strict in practice.
+    wake_threshold = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.4"))
     logger.info("wake_word threshold=%.2f (override with WAKE_WORD_THRESHOLD env)", wake_threshold)
     detector = WakeWordDetector(keyword="hey_jarvis", threshold=wake_threshold)
     last_unmute = 0.0
@@ -150,7 +157,8 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
             debug["max_rms"] = 0
             debug["max_score"] = 0.0
             if (
-                not mic_track.muted
+                not skip_wake_word
+                and not mic_track.muted
                 and loop.time() - last_unmute > SILENCE_SECONDS_TO_MUTE
             ):
                 mic_track.mute()

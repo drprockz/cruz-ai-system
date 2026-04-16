@@ -261,14 +261,35 @@ async def entrypoint(ctx: Any) -> None:
         stt_state["keepalive_task"] = asyncio.create_task(_stt_keepalive())
         logger.info("deepgram STT WS opened lazily")
 
+    last_audio_at: dict = {"ts": asyncio.get_event_loop().time()}
+
     async def _pump_audio_into_stt() -> None:
         async for participant in _iter_remote_participants(room):
             async for frame in _iter_audio_frames(room, participant):
+                last_audio_at["ts"] = asyncio.get_event_loop().time()
                 # Connect Deepgram on the first frame we actually receive.
                 await _ensure_stt_connected()
                 if speaking["active"] and _is_speech(frame) and not tts_cancel.is_set():
                     tts_cancel.set()
                 await stt.send(bytes(frame.data))
+
+    async def _idle_watchdog() -> None:
+        """Exit gracefully if no audio arrives within AUDIO_IDLE_TIMEOUT seconds.
+
+        Stale rooms (Ctrl+C'd daemons) dispatch jobs to the worker that will
+        never see audio. Without this, the worker hangs until livekit-agents
+        force-cancels the entrypoint.
+        """
+        timeout = float(os.environ.get("AUDIO_IDLE_TIMEOUT", "90"))
+        while True:
+            await asyncio.sleep(10)
+            idle = asyncio.get_event_loop().time() - last_audio_at["ts"]
+            if idle > timeout:
+                logger.info(
+                    "no audio for %.0fs — exiting job (likely stale room)",
+                    idle,
+                )
+                return
 
     async def _process_turns() -> None:
         nonlocal turns, barges
@@ -303,7 +324,23 @@ async def entrypoint(ctx: Any) -> None:
                     )
 
     try:
-        await asyncio.gather(_pump_audio_into_stt(), _process_turns())
+        # wait returns when the FIRST of these completes — idle_watchdog
+        # completing means "stale room, exit cleanly".
+        pump = asyncio.create_task(_pump_audio_into_stt())
+        turns_task = asyncio.create_task(_process_turns())
+        watchdog = asyncio.create_task(_idle_watchdog())
+        done, pending = await asyncio.wait(
+            {pump, turns_task, watchdog},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        for t in done:
+            if t is watchdog:
+                continue
+            exc = t.exception()
+            if exc:
+                logger.exception("voice task failed", exc_info=exc)
     finally:
         ka_task = stt_state.get("keepalive_task")
         if ka_task is not None:

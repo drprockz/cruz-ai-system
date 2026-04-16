@@ -226,11 +226,14 @@ async def entrypoint(ctx: Any) -> None:
 
     stt = DeepgramSTT()
     tts = DeepgramTTS()
-    await stt.connect()
+    # LAZY connect — Deepgram closes an idle WS after ~10s. Only connect
+    # when we have real audio to send (i.e. after the client unmutes the
+    # mic post-wake-word), and keep-alive every 5s while connected.
 
     cruz = CruzAgent()
     tts_cancel: asyncio.Event = asyncio.Event()
     speaking: dict = {"active": False}
+    stt_state: dict = {"connected": False, "keepalive_task": None}
     audio_source = rtc.AudioSource(sample_rate=tts.sample_rate, num_channels=1)
     track = rtc.LocalAudioTrack.create_audio_track("cruz-voice", audio_source)
     await room.local_participant.publish_track(track)
@@ -238,9 +241,31 @@ async def entrypoint(ctx: Any) -> None:
     turns: int = 0
     barges: int = 0
 
+    async def _stt_keepalive() -> None:
+        # Deepgram recommends keepalive every 3-10s when idle. 5s is safe.
+        while stt_state["connected"]:
+            try:
+                await asyncio.sleep(5)
+                if stt_state["connected"] and stt._conn is not None:
+                    await stt._conn.keep_alive()  # type: ignore[union-attr]
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("stt keepalive failed")
+
+    async def _ensure_stt_connected() -> None:
+        if stt_state["connected"]:
+            return
+        await stt.connect()
+        stt_state["connected"] = True
+        stt_state["keepalive_task"] = asyncio.create_task(_stt_keepalive())
+        logger.info("deepgram STT WS opened lazily")
+
     async def _pump_audio_into_stt() -> None:
         async for participant in _iter_remote_participants(room):
             async for frame in _iter_audio_frames(room, participant):
+                # Connect Deepgram on the first frame we actually receive.
+                await _ensure_stt_connected()
                 if speaking["active"] and _is_speech(frame) and not tts_cancel.is_set():
                     tts_cancel.set()
                 await stt.send(bytes(frame.data))
@@ -280,6 +305,10 @@ async def entrypoint(ctx: Any) -> None:
     try:
         await asyncio.gather(_pump_audio_into_stt(), _process_turns())
     finally:
+        ka_task = stt_state.get("keepalive_task")
+        if ka_task is not None:
+            stt_state["connected"] = False
+            ka_task.cancel()
         await stt.close()
         try:
             await session_svc.end(session_id, turns=turns, barges=barges)

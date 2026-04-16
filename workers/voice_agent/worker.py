@@ -102,8 +102,20 @@ async def _iter_audio_frames(room: Any, participant: Any) -> AsyncIterator[Any]:
         return await fut
 
     track = await _wait_for_audio_track()
-    stream = rtc.AudioStream(track)
+    # Force 16kHz mono — Deepgram STT is configured for this rate.
+    # Without this, LiveKit may deliver 48kHz opus-decoded frames and
+    # Deepgram will hear garbled speech (running at ~3x speed).
+    stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+    logged_first = False
     async for event in stream:
+        if not logged_first:
+            f = event.frame
+            logger.info(
+                "first audio frame: sample_rate=%d channels=%d samples=%d bytes=%d",
+                f.sample_rate, f.num_channels,
+                f.samples_per_channel, len(bytes(f.data)),
+            )
+            logged_first = True
         yield event.frame
 
 

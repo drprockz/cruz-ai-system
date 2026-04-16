@@ -64,19 +64,36 @@ class DeepgramSTT:
 
         async def _on_transcript(_self: object, result: object, **kwargs) -> None:
             # deepgram-sdk 3.11 calls callbacks with (client, result, **kwargs)
-            # — accept kwargs so the SDK doesn't raise on extra keyword args.
             try:
                 alt = result.channel.alternatives[0]  # type: ignore[union-attr]
                 text = (alt.transcript or "").strip()
+                is_final = bool(result.is_final)  # type: ignore[union-attr]
                 if not text:
                     return
-                await self._queue.put(
-                    STTTranscript(text=text, is_final=bool(result.is_final))  # type: ignore[union-attr]
+                logger.info(
+                    "deepgram transcript: final=%s text=%r", is_final, text,
                 )
+                await self._queue.put(STTTranscript(text=text, is_final=is_final))
             except Exception:
                 logger.exception("DeepgramSTT transcript parse failed")
 
+        async def _on_open(_self: object, data: object = None, **kwargs) -> None:
+            logger.info("deepgram STT WS opened")
+
+        async def _on_close(_self: object, data: object = None, **kwargs) -> None:
+            logger.info("deepgram STT WS closed: %s", data)
+
+        async def _on_error(_self: object, error: object = None, **kwargs) -> None:
+            logger.error("deepgram STT error: %s", error)
+
         self._conn.on(self._conn._TRANSCRIPT_EVENT, _on_transcript)  # type: ignore[union-attr]
+        try:
+            from deepgram import LiveTranscriptionEvents  # type: ignore
+            self._conn.on(LiveTranscriptionEvents.Open, _on_open)  # type: ignore[union-attr]
+            self._conn.on(LiveTranscriptionEvents.Close, _on_close)  # type: ignore[union-attr]
+            self._conn.on(LiveTranscriptionEvents.Error, _on_error)  # type: ignore[union-attr]
+        except Exception:
+            pass  # tests use a fake SDK
 
         try:
             from deepgram import LiveOptions  # type: ignore

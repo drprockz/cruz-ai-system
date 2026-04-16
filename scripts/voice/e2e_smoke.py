@@ -126,6 +126,11 @@ async def main():
     def _on_track_sub(track, pub, participant):
         if track.kind != rtc.TrackKind.KIND_AUDIO:
             return
+        # Ignore our own track echo — only collect audio FROM the worker agent.
+        if participant.identity == "test-client":
+            logger.info("ignoring self-track echo from %s", participant.identity)
+            return
+        logger.info("subscribed to remote audio track from %s", participant.identity)
         async def _collect():
             stream = rtc.AudioStream(track)
             async for ev in stream:
@@ -140,8 +145,20 @@ async def main():
         asyncio.create_task(_collect())
     room.on("track_subscribed", _on_track_sub)
 
-    # Wait for worker agent to join (dispatched on participant_connected)
-    await asyncio.sleep(2)
+    # Wait for worker agent to join AND its AudioStream to warm up before
+    # playing the wav. Too short = wav ends before worker starts reading frames.
+    warmup_s = float(os.environ.get("E2E_WARMUP_SECONDS", "8"))
+    logger.info("warmup %ss (waiting for worker audio pipeline)...", warmup_s)
+    # Pre-fill a second of silence so the worker has SOMETHING to read early
+    silent_sr = 16000
+    spc = silent_sr // 50
+    for _ in range(int(warmup_s * 50)):
+        f = rtc.AudioFrame(
+            data=b"\x00" * (spc * 2), sample_rate=silent_sr,
+            num_channels=1, samples_per_channel=spc,
+        )
+        await mic_src.capture_frame(f)
+        await asyncio.sleep(0.02)
 
     publish_start = asyncio.get_event_loop().time()
     await _publish_wav(mic_src, wav_path)

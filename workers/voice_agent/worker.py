@@ -275,15 +275,70 @@ async def entrypoint(ctx: Any) -> None:
 
     last_audio_at: dict = {"ts": asyncio.get_event_loop().time()}
 
+    # If DEBUG_SAVE_AUDIO=1, persist all received PCM to disk so we can
+    # replay it and confirm audio quality end-to-end.
+    debug_dump_path = None
+    if os.environ.get("DEBUG_SAVE_AUDIO") == "1":
+        debug_dump_path = f"/tmp/cruz_worker_in_{session_id[:8]}.raw"
+        logger.info("DEBUG_SAVE_AUDIO=1 — dumping received PCM to %s", debug_dump_path)
+    debug_dump_handle = open(debug_dump_path, "wb") if debug_dump_path else None
+    frame_count: dict = {"n": 0, "total_bytes": 0}
+
+    # Direct track-subscription — simpler and more reliable than the previous
+    # _iter_remote_participants / _iter_audio_frames generator chain.
+    _pump_tasks: list = []
+
+    async def _consume_track(track: Any, participant_identity: str) -> None:
+        logger.info("consuming audio track from %s", participant_identity)
+        stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+        first = True
+        async for event in stream:
+            f = event.frame
+            if first:
+                logger.info(
+                    "first audio frame: sr=%d ch=%d samples=%d bytes=%d",
+                    f.sample_rate, f.num_channels,
+                    f.samples_per_channel, len(bytes(f.data)),
+                )
+                first = False
+            last_audio_at["ts"] = asyncio.get_event_loop().time()
+            await _ensure_stt_connected()
+            if speaking["active"] and _is_speech(f) and not tts_cancel.is_set():
+                tts_cancel.set()
+            data = bytes(f.data)
+            frame_count["n"] += 1
+            frame_count["total_bytes"] += len(data)
+            if debug_dump_handle is not None:
+                debug_dump_handle.write(data)
+                debug_dump_handle.flush()
+            await stt.send(data)
+
+    def _on_track_subscribed(track: Any, pub: Any, participant: Any) -> None:
+        if track.kind != rtc.TrackKind.KIND_AUDIO:
+            return
+        logger.info("track_subscribed: audio from %s", participant.identity)
+        task = asyncio.create_task(
+            _consume_track(track, participant.identity)
+        )
+        _pump_tasks.append(task)
+
+    room.on("track_subscribed", _on_track_subscribed)
+
+    # Handle pre-existing participants (race: they may have already published
+    # a track before our listener wired up).
+    for p in room.remote_participants.values():
+        for pub in p.track_publications.values():
+            if pub.kind == rtc.TrackKind.KIND_AUDIO and pub.track is not None:
+                logger.info("pre-subscribed track from %s", p.identity)
+                _pump_tasks.append(asyncio.create_task(
+                    _consume_track(pub.track, p.identity)
+                ))
+
     async def _pump_audio_into_stt() -> None:
-        async for participant in _iter_remote_participants(room):
-            async for frame in _iter_audio_frames(room, participant):
-                last_audio_at["ts"] = asyncio.get_event_loop().time()
-                # Connect Deepgram on the first frame we actually receive.
-                await _ensure_stt_connected()
-                if speaking["active"] and _is_speech(frame) and not tts_cancel.is_set():
-                    tts_cancel.set()
-                await stt.send(bytes(frame.data))
+        # The actual consumption happens in _consume_track tasks above.
+        # This coroutine stays alive for asyncio.wait() semantics.
+        while True:
+            await asyncio.sleep(5)
 
     async def _idle_watchdog() -> None:
         """Exit gracefully if no audio arrives within AUDIO_IDLE_TIMEOUT seconds.

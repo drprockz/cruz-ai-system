@@ -617,7 +617,13 @@ class CruzAgent(BaseAgent):
         sem_service = SemanticMemoryService(
             get_qdrant_service(), get_embedding_service()
         )
-        semantic_hits = await sem_service.search_similar(task, limit=10)
+        try:
+            semantic_hits = await sem_service.search_similar(task, limit=10)
+        except Exception as exc:
+            logger.warning(
+                "semantic memory unavailable (continuing without): %s", exc
+            )
+            semantic_hits = []
 
         messages: List[Dict[str, Any]] = [
             *semantic_hits, *history, {"role": "user", "content": task},
@@ -728,14 +734,19 @@ class CruzAgent(BaseAgent):
                 user_task=task,
                 assistant_result=final_text,
             )
-            await sem_service.store(
-                id=str(_uuid.uuid4()), role="user",
-                content=task, conversation_id=conversation_id,
-            )
-            await sem_service.store(
-                id=str(_uuid.uuid4()), role="assistant",
-                content=final_text, conversation_id=conversation_id,
-            )
+            try:
+                await sem_service.store(
+                    id=str(_uuid.uuid4()), role="user",
+                    content=task, conversation_id=conversation_id,
+                )
+                await sem_service.store(
+                    id=str(_uuid.uuid4()), role="assistant",
+                    content=final_text, conversation_id=conversation_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "semantic memory store failed (non-fatal): %s", exc
+                )
 
         yield Done(
             tokens_used=total_tokens,

@@ -16,6 +16,8 @@ config = context.config
 _db_url = os.environ.get("DATABASE_URL")
 if _db_url:
     _sync_url = _db_url.replace("postgresql+asyncpg://", "postgresql://")
+    # ConfigParser interpolates `%` — escape URL-encoded chars like `%40` to `%%40`
+    _sync_url = _sync_url.replace("%", "%%")
     config.set_main_option("sqlalchemy.url", _sync_url)
 
 # Interpret the config file for Python logging.

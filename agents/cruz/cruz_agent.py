@@ -333,7 +333,14 @@ class CruzAgent(BaseAgent):
 
             # ── Semantic memory — retrieve relevant past exchanges ────────
             sem_service = SemanticMemoryService(get_qdrant_service(), get_embedding_service())
-            semantic_hits = await sem_service.search_similar(input["task"], limit=10)
+            try:
+                semantic_hits = await sem_service.search_similar(input["task"], limit=10)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] semantic memory unavailable (continuing without): %s",
+                    input["trace_id"], exc,
+                )
+                semantic_hits = []
 
             # Order: [semantic context] [session history] [handoff note?] [new user message]
             messages: List[Dict[str, Any]] = [
@@ -436,18 +443,24 @@ class CruzAgent(BaseAgent):
                         assistant_result=text,
                     )
                     # Store both turns in semantic memory for future retrieval
-                    await sem_service.store(
-                        id=str(_uuid.uuid4()),
-                        role="user",
-                        content=input["task"],
-                        conversation_id=conversation_id,
-                    )
-                    await sem_service.store(
-                        id=str(_uuid.uuid4()),
-                        role="assistant",
-                        content=text,
-                        conversation_id=conversation_id,
-                    )
+                    try:
+                        await sem_service.store(
+                            id=str(_uuid.uuid4()),
+                            role="user",
+                            content=input["task"],
+                            conversation_id=conversation_id,
+                        )
+                        await sem_service.store(
+                            id=str(_uuid.uuid4()),
+                            role="assistant",
+                            content=text,
+                            conversation_id=conversation_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] semantic memory store failed (non-fatal): %s",
+                            input["trace_id"], exc,
+                        )
                     await self.log(
                         db=db,
                         trace_id=input["trace_id"],

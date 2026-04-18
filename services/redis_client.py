@@ -103,6 +103,14 @@ class RedisService:
         client = self._require_client()
         await client.publish(channel, message)
 
+    def pubsub(self):
+        """Return an async pubsub object from the underlying Redis client.
+
+        Used by SSE endpoints that fan out pub/sub messages. Caller is
+        responsible for subscribe/unsubscribe/close lifecycle.
+        """
+        return self._require_client().pubsub()
+
 
 def get_redis_service() -> RedisService:
     """Return the module-level RedisService singleton."""

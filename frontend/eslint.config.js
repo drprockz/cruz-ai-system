@@ -20,4 +20,13 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // Shadcn-generated components export constants (cva variants) alongside
+    // the component itself. The fast-refresh rule is a cosmetic HMR warning
+    // that doesn't apply to library components we don't edit.
+    files: ['src/components/ui/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

@@ -433,7 +433,14 @@ if __name__ == "__main__":
     # This guard prevents the ImportError from crashing the module on 3.9.
     try:
         from livekit.agents import WorkerOptions, cli  # type: ignore
-        cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+        # agent_name is REQUIRED for explicit dispatch on livekit-agents >=1.x.
+        # The /voice/token endpoint references this name via RoomConfiguration.
+        cli.run_app(
+            WorkerOptions(
+                agent_name="cruz-voice",
+                entrypoint_fnc=entrypoint,
+            )
+        )
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
             f"livekit-agents requires Python 3.10+. Got: {exc}"

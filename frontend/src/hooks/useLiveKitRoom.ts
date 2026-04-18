@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Room,
   RoomEvent,
@@ -60,19 +60,30 @@ async function _ensureRoom(deviceId: string): Promise<Room> {
         participant: RemoteParticipant,
       ) => {
         if (track.kind !== Track.Kind.Audio) return;
-        const isMac = /Macintosh/.test(navigator.userAgent);
-        // On Mac the daemon owns speakers; web UI is visual only by default.
-        // To force browser audio on Mac (e.g. testing without daemon), set
-        // sessionStorage["cruz:web_audio"] = "1" from DevTools.
-        const forceWebAudio =
-          sessionStorage.getItem("cruz:web_audio") === "1";
-        if (
-          participant.identity.startsWith("agent-") &&
-          (!isMac || forceWebAudio)
-        ) {
-          const el = track.attach();
+        // The web UI and the Mac daemon join DIFFERENT rooms (deviceId
+        // `mac-web` vs `mac-mini`), so there's no speaker double-play risk
+        // even on Mac. Always attach agent audio so browser-initiated PTT
+        // gets a response. To silence browser audio (e.g. during daemon
+        // testing) set sessionStorage["cruz:mute_web_audio"] = "1".
+        const muteWebAudio =
+          sessionStorage.getItem("cruz:mute_web_audio") === "1";
+        if (participant.identity.startsWith("agent-") && !muteWebAudio) {
+          const el = track.attach() as HTMLAudioElement;
           el.autoplay = true;
+          el.muted = false;
+          el.volume = 1.0;
+          el.setAttribute("playsinline", "");
+          el.setAttribute("data-cruz-agent-audio", "1");
           document.body.appendChild(el);
+          // Chrome can block autoplay even post-user-gesture on some
+          // configs; nudge it explicitly and surface failures.
+          void el.play().catch((err: unknown) => {
+            console.warn("[cruz] agent audio autoplay blocked:", err);
+          });
+          console.log(
+            "[cruz] agent audio attached from",
+            participant.identity,
+          );
         }
       },
     );
@@ -101,12 +112,33 @@ async function _ensureRoom(deviceId: string): Promise<Room> {
       _notify();
     });
 
+    console.log("[cruz] connecting LiveKit room:", tok.room, "@", tok.ws_url);
     await r.connect(tok.ws_url, tok.token);
+    console.log("[cruz] LiveKit connected; waiting for cruz-voice-worker…");
     _state.room = r;
     _state.connected = true;
     _state.deviceId = deviceId;
     _state.connecting = null;
     _notify();
+
+    // Agent-join watchdog: LiveKit Cloud should dispatch cruz-voice-worker
+    // within a few seconds. If it doesn't, the room is orphaned — warn
+    // the user so they don't hold-to-talk into a black hole.
+    setTimeout(() => {
+      const agentHere = Array.from(r.remoteParticipants.values()).some(
+        (p) => p.identity.startsWith("agent-"),
+      );
+      if (!agentHere) {
+        console.warn(
+          "[cruz] NO AGENT in room after 6s. cruz-voice-worker did not " +
+            "get dispatched. Run `sessionStorage.clear(); location.reload()` " +
+            "to force a fresh room, and check `pm2 logs cruz-voice-worker`.",
+        );
+      } else {
+        console.log("[cruz] agent participant present — voice loop ready.");
+      }
+    }, 6000);
+
     return r;
   })();
 
@@ -118,39 +150,105 @@ async function _ensureRoom(deviceId: string): Promise<Room> {
   }
 }
 
+// Module-scoped mic track — one persistent track, muted between PTT presses.
+// Creating a fresh LocalAudioTrack on every press races with LiveKit's async
+// publish/unpublish and drops turns ("could not find local track subscription").
+const _mic: {
+  track: LocalAudioTrack | null;
+  published: boolean;
+  busy: Promise<void> | null;
+} = { track: null, published: false, busy: null };
+
+async function _serialize<T>(fn: () => Promise<T>): Promise<T> {
+  // Wait for any in-flight PTT op to settle before starting the next one.
+  while (_mic.busy) {
+    try {
+      await _mic.busy;
+    } catch {
+      /* previous op failed; we still proceed */
+    }
+  }
+  let resolve!: () => void;
+  _mic.busy = new Promise<void>((res) => {
+    resolve = res;
+  });
+  try {
+    return await fn();
+  } finally {
+    resolve();
+    _mic.busy = null;
+  }
+}
+
 export function useLiveKitRoom(deviceId: string) {
   const [, forceRender] = useState(0);
-  const micTrackRef = useRef<LocalAudioTrack | null>(null);
 
   useEffect(() => {
     const onChange = () => forceRender((n) => n + 1);
     _listeners.add(onChange);
     _ensureRoom(deviceId).catch((exc: unknown) => {
-      console.error("livekit connect failed", exc);
+      console.error("[cruz] livekit connect failed", exc);
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      if (!(window as unknown as { __cruzLKWarned?: boolean }).__cruzLKWarned) {
+        (window as unknown as { __cruzLKWarned?: boolean }).__cruzLKWarned =
+          true;
+        console.warn(
+          "[cruz] voice disabled — token/LiveKit error. PTT will refuse.",
+          msg,
+        );
+      }
     });
     return () => {
       _listeners.delete(onChange);
-      // Don't disconnect on unmount — other consumers may still want the room.
-      // Room stays alive for the browser session; torn down via Disconnected event.
     };
   }, [deviceId]);
 
-  const startPTT = async () => {
-    const r = _state.room ?? (await _ensureRoom(deviceId));
-    const t = await createLocalAudioTrack();
-    micTrackRef.current = t;
-    await r.localParticipant.publishTrack(t);
-    useVoice.getState().set({ state: "listening" });
-  };
+  const startPTT = () =>
+    _serialize(async () => {
+      try {
+        console.log("[cruz] PTT down → ensuring room…");
+        const r = _state.room ?? (await _ensureRoom(deviceId));
+        try {
+          await r.startAudio();
+          console.log("[cruz] audio context resumed");
+        } catch (err) {
+          console.warn("[cruz] startAudio failed (continuing):", err);
+        }
+        // Reuse a single mic track; just unmute instead of re-creating.
+        if (!_mic.track) {
+          console.log("[cruz] PTT creating mic track (first press)…");
+          _mic.track = await createLocalAudioTrack();
+        }
+        if (!_mic.published) {
+          await r.localParticipant.publishTrack(_mic.track);
+          _mic.published = true;
+          console.log("[cruz] PTT mic published");
+        }
+        await _mic.track.unmute();
+        console.log("[cruz] PTT mic unmuted");
+        useVoice.getState().set({ state: "listening" });
+      } catch (exc) {
+        console.error("[cruz] PTT start failed:", exc);
+        useVoice.getState().set({ state: "idle" });
+        alert(
+          "Mic failed: " +
+            (exc instanceof Error ? exc.message : String(exc)) +
+            "\n\nCheck browser mic permission for this site.",
+        );
+      }
+    });
 
-  const stopPTT = async () => {
-    const r = _state.room;
-    if (!r || !micTrackRef.current) return;
-    await r.localParticipant.unpublishTrack(micTrackRef.current);
-    micTrackRef.current.stop();
-    micTrackRef.current = null;
-    useVoice.getState().set({ state: "thinking" });
-  };
+  const stopPTT = () =>
+    _serialize(async () => {
+      try {
+        if (!_mic.track) return;
+        await _mic.track.mute();
+        console.log("[cruz] PTT up → mic muted, waiting for CRUZ…");
+        useVoice.getState().set({ state: "thinking" });
+      } catch (exc) {
+        console.error("[cruz] PTT stop failed:", exc);
+      }
+    });
 
   return {
     room: _state.room,

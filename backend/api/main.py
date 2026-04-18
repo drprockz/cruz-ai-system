@@ -794,6 +794,8 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
     import datetime
 
     from livekit import api as lkapi  # lazy import — only needed at call time
+    from livekit.protocol.agent_dispatch import RoomAgentDispatch
+    from livekit.protocol.room import RoomConfiguration
 
     api_key = os.environ.get("LIVEKIT_API_KEY", "")
     api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
@@ -804,6 +806,14 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
     conversation_id = req.conversation_id or str(uuid.uuid4())
     # `__` as the delimiter — safe against UUID dashes in conversation_id.
     room = f"cruz__{conversation_id}__{req.device_id}"
+
+    # Explicit agent dispatch — required for livekit-agents >=1.x workers that
+    # register with a named agent (`cruz-voice`). Without this the worker
+    # never gets dispatched to the room and the browser sees silence.
+    room_cfg = RoomConfiguration(
+        name=room,
+        agents=[RoomAgentDispatch(agent_name="cruz-voice")],
+    )
 
     token = (
         lkapi.AccessToken(api_key, api_secret)
@@ -817,6 +827,7 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
                 can_subscribe=True,
             )
         )
+        .with_room_config(room_cfg)
         .with_ttl(datetime.timedelta(minutes=15))
         .to_jwt()
     )

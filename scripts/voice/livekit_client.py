@@ -88,9 +88,11 @@ async def _join_and_run(tok_info: dict, conversation_id: str):
 
     room.on("track_subscribed", on_track_sub)
 
-    # Default 0.4 — real-world mics (Brio 100, AirPods) peak around 0.4-0.5
-    # on clear speech. 0.5 was too strict in practice.
-    wake_threshold = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.4"))
+    # Default 0.3 — lowered from 0.4 because AirPods compress mic signal,
+    # reducing peak scores below the old threshold on clear speech.
+    # Override with WAKE_WORD_THRESHOLD env var (e.g. WAKE_WORD_THRESHOLD=0.4
+    # for a wired mic in a quiet room, or 0.25 in noisy environments).
+    wake_threshold = float(os.environ.get("WAKE_WORD_THRESHOLD", "0.3"))
     logger.info("wake_word threshold=%.2f (override with WAKE_WORD_THRESHOLD env)", wake_threshold)
     detector = WakeWordDetector(keyword="hey_jarvis", threshold=wake_threshold)
     last_unmute = 0.0

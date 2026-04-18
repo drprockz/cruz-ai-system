@@ -895,6 +895,96 @@ async def events_stream(
     )
 
 
+# ---------------------------------------------------------------------------
+# GET /dashboard — aggregate payload for the Dashboard tab
+# ---------------------------------------------------------------------------
+
+@app.get("/dashboard")
+async def dashboard() -> JSONResponse:
+    """
+    Aggregate payload for the DashboardTab.
+
+    Returns four blocks:
+      today        — calendar events, emails, PRs, deploys (Phase 2 integrations)
+      metrics      — today's agent_logs roll-up (turns, tokens, cost, time saved)
+      system_health — key service reachability derived from env vars + /health probe
+      upcoming     — scheduled background agents
+    """
+    db = get_db_service()
+
+    # ── Metrics — today's agent_logs roll-up ──────────────────────────────
+    try:
+        row = await db.fetchrow(
+            "SELECT COUNT(*)::int AS turns, "
+            "COALESCE(SUM(tokens_used),0)::int AS tokens, "
+            "COALESCE(SUM(duration_ms),0)::int AS duration_total_ms "
+            "FROM agent_logs WHERE created_at > NOW() - INTERVAL '1 day'"
+        )
+        turns = row["turns"] if row else 0
+        tokens = row["tokens"] if row else 0
+        duration_total_ms = row["duration_total_ms"] if row else 0
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("dashboard metrics fetch failed: %s", exc)
+        turns, tokens, duration_total_ms = 0, 0, 0
+
+    # ── System health — probe via health_check() + env-var presence ───────
+    try:
+        health_resp = await health_check()
+        # health_check returns a JSONResponse; extract its body
+        import json as _json_inner
+        sh_raw = _json_inner.loads(health_resp.body) if hasattr(health_resp, "body") else {}
+    except Exception:
+        sh_raw = {}
+
+    def _state(x: Any) -> str:
+        if isinstance(x, dict):
+            s = x.get("status", "")
+            return "healthy" if s in ("reachable", "connected", "loaded", "healthy") else "degraded"
+        if x in ("healthy", "connected", "reachable"):
+            return "healthy"
+        return "degraded"
+
+    system_health = {
+        "deepgram": "healthy" if os.environ.get("DEEPGRAM_API_KEY") else "degraded",
+        "livekit": "healthy" if os.environ.get("LIVEKIT_API_KEY") else "degraded",
+        "postgres": _state(sh_raw.get("postgresql")),
+        "redis": _state(sh_raw.get("redis")),
+        "qdrant": _state(sh_raw.get("qdrant")),
+        "ollama": _state(sh_raw.get("ollama")),
+        "claude_api": _state(sh_raw.get("claude_api", "healthy")),
+    }
+
+    # ── Cost heuristics ────────────────────────────────────────────────────
+    # Weighted avg of $3/M input + $15/M output ≈ $9/M blended
+    estimated_cost = round((tokens / 1_000_000.0) * 9.0, 2)
+    # Rough heuristic: each CRUZ turn saves ~6 minutes
+    estimated_time_saved_hours = round(turns * 0.1, 1)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "today": {
+                "calendar_events": [],   # Phase 2 — Google Calendar integration
+                "unread_emails": 0,      # Phase 2 — Gmail integration
+                "open_prs": 0,           # Phase 2 — GitHub webhook mirror
+                "deploys_today": 0,      # Phase 2 — Vercel/Railway webhook mirror
+            },
+            "metrics": {
+                "turns_today": turns,
+                "tokens_today": tokens,
+                "estimated_cost_usd": estimated_cost,
+                "estimated_time_saved_hours": estimated_time_saved_hours,
+            },
+            "system_health": system_health,
+            "upcoming": [
+                {"agent": "pulse", "scheduled_at": "tomorrow 06:00", "label": "Morning brief"},
+                {"agent": "raw", "scheduled_at": "tonight 03:00", "label": "Research scan"},
+            ],
+        },
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
 

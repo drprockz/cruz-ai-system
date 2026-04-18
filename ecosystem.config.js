@@ -18,6 +18,7 @@ const path = require("path");
 
 const ROOT = __dirname;
 const VENV_PY = path.join(ROOT, "venv/bin/python");
+const VENV_PY311 = path.join(ROOT, "venv-py311/bin/python");
 const LOGS_DIR = path.join(ROOT, "logs");
 
 module.exports = {
@@ -63,6 +64,33 @@ module.exports = {
       },
       out_file: path.join(LOGS_DIR, "cruz-worker-out.log"),
       error_file: path.join(LOGS_DIR, "cruz-worker-err.log"),
+      merge_logs: true,
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    },
+    // ──────────────────────────────────────────────────────────────────────
+    // cruz-daemon: Mac voice listener — wake-word detection + speaker output.
+    // Joins the LiveKit room as "agent-daemon" and owns mic/speaker on Mac.
+    // Uses Python 3.11 venv (livekit-agents requires 3.11+).
+    // ──────────────────────────────────────────────────────────────────────
+    {
+      name: "cruz-daemon",
+      script: VENV_PY311,
+      args: "scripts/voice/livekit_client.py --host http://localhost:3000",
+      cwd: ROOT,
+      interpreter: "none",
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "512M",
+      min_uptime: "10s",
+      max_restarts: 5,
+      restart_delay: 3000,
+      kill_timeout: 10000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        PYTHONPATH: ROOT,
+      },
+      out_file: path.join(LOGS_DIR, "cruz-daemon-out.log"),
+      error_file: path.join(LOGS_DIR, "cruz-daemon-err.log"),
       merge_logs: true,
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
     },

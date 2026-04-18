@@ -366,8 +366,17 @@ class CommandResponse(BaseModel):
 
 
 def _sse_event(payload: dict) -> str:
-    """Format a single SSE event line."""
-    return f"data: {json.dumps(payload)}\n\n"
+    """Format a single SSE event line.
+
+    If payload has ``__event__``, emit a named SSE event:
+        event: <name>\\ndata: <json>\\n\\n
+    Otherwise emit a plain data-only event.
+    """
+    event_name = payload.get("__event__") if isinstance(payload, dict) else None
+    if event_name:
+        data = payload.get("data", {})
+        return f"event: {event_name}\ndata: {json.dumps(data, default=str)}\n\n"
+    return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
 async def _sse_stream(
@@ -799,6 +808,89 @@ async def voice_token(req: VoiceTokenRequest) -> JSONResponse:
             "token": token,
             "ws_url": ws_url,
             "conversation_id": conversation_id,
+        },
+    )
+
+
+# ─── Events SSE ──────────────────────────────────────────────────────────────
+
+@app.get("/events")
+async def events_stream(
+    request: Request,
+    last_id: Optional[int] = None,
+) -> StreamingResponse:
+    """
+    SSE stream of agent_logs rows.
+
+    - On connect: emit ``event: replay`` with up to 50 recent rows (or rows
+      after ``last_id`` when provided).
+    - Then emit ``event: sync`` so the client knows it has caught up.
+    - Then subscribe to the Redis channel ``cruz:agent_logs`` and emit
+      ``event: log`` for each incoming message.
+    - Emit ``event: ping`` every 25 s to keep the connection alive.
+    """
+    import asyncio as _asyncio
+
+    async def _gen() -> AsyncGenerator[str, None]:
+        db = get_db_service()
+        redis_svc = get_redis_service()
+        pubsub = redis_svc.pubsub()
+        try:
+            # ── Replay ──────────────────────────────────────────────────────
+            if last_id is None:
+                rows = await db.fetch(
+                    "SELECT id, trace_id, agent, action, status, "
+                    "tokens_used, duration_ms, created_at "
+                    "FROM agent_logs ORDER BY id DESC LIMIT 50",
+                )
+                rows = list(reversed(rows))
+            else:
+                rows = await db.fetch(
+                    "SELECT id, trace_id, agent, action, status, "
+                    "tokens_used, duration_ms, created_at "
+                    "FROM agent_logs WHERE id > $1 ORDER BY id ASC LIMIT 500",
+                    last_id,
+                )
+            replay = [dict(r) for r in rows]
+            yield _sse_event({"__event__": "replay", "data": replay})
+
+            last_replay_id = replay[-1]["id"] if replay else last_id
+            yield _sse_event({"__event__": "sync", "data": {"last_id": last_replay_id}})
+
+            # ── Subscribe ────────────────────────────────────────────────────
+            await pubsub.subscribe("cruz:agent_logs")
+            last_ping = _asyncio.get_event_loop().time()
+
+            async for msg in pubsub.listen():
+                if await request.is_disconnected():
+                    break
+                now = _asyncio.get_event_loop().time()
+                if now - last_ping > 25:
+                    yield _sse_event({"__event__": "ping", "data": {"t": int(now)}})
+                    last_ping = now
+                if msg.get("type") != "message":
+                    continue
+                data = msg.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(data) if isinstance(data, str) else data
+                except Exception:
+                    parsed = {"raw": str(data)}
+                yield _sse_event({"__event__": "log", "data": parsed})
+        finally:
+            try:
+                await pubsub.unsubscribe("cruz:agent_logs")
+                await pubsub.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
         },
     )
 

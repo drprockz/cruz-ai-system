@@ -52,12 +52,30 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
 fi
 
 # ── 4. Ensure PostgreSQL + Redis are running ──────────────────────────────────
-info "Checking PostgreSQL 16…"
-if brew services list | grep -q "postgresql@16.*started"; then
-  info "  PostgreSQL 16 already running"
+# We don't care which PG version owns port 5432 — only that ONE is reachable.
+# This machine has both 15 and 16 installed; the app's data lives on the one
+# that currently owns 5432 (whichever started first wins — usually 15).
+info "Checking PostgreSQL on port 5432…"
+if nc -z 127.0.0.1 5432 2>/dev/null; then
+  info "  PostgreSQL is already reachable on :5432"
 else
-  info "  Starting PostgreSQL 16…"
-  brew services start postgresql@16
+  info "  Nothing on :5432 — trying to start postgresql@15…"
+  if ! brew services start postgresql@15 2>&1 | tail -2; then
+    warn "  postgresql@15 failed — trying postgresql@16…"
+    brew services start postgresql@16 2>&1 | tail -2 || true
+  fi
+  # Wait up to 10s for it to come up
+  for i in $(seq 1 10); do
+    if nc -z 127.0.0.1 5432 2>/dev/null; then
+      info "  PostgreSQL reachable after ${i}s"
+      break
+    fi
+    sleep 1
+  done
+  if ! nc -z 127.0.0.1 5432 2>/dev/null; then
+    error "Postgres did not come up on :5432. Start manually then rerun."
+    exit 1
+  fi
 fi
 
 info "Checking Redis…"

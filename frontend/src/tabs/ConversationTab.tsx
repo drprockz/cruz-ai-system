@@ -28,7 +28,7 @@ export function ConversationTab() {
     setInput("");
     setVoice({ state: "thinking" });
     try {
-      const r = await fetch("/api/command", {
+      const r = await fetch(`${import.meta.env.VITE_API_BASE ?? "/api"}/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

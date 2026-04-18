@@ -111,8 +111,10 @@ if $needs_build; then
     info "  Installing frontend node_modules…"
     npm install --silent
   fi
-  info "  Running npm run build…"
-  npm run build
+  info "  Running npm run build (API base → http://localhost:3000)…"
+  # Static `serve` has no proxy, so the build must call the API directly.
+  # CORS is wide-open on the backend so this works for localhost + Tailscale.
+  VITE_API_BASE="http://localhost:3000" npm run build
   info "  Frontend build complete"
   popd > /dev/null
 fi

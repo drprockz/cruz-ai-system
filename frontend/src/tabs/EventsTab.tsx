@@ -4,21 +4,35 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 function statusClass(status: string): string {
-  if (status === "success") return "text-green-500";
-  if (status === "error") return "text-red-500";
-  return "text-amber-500";
+  if (status === "success") return "text-emerald-400";
+  if (status === "error") return "text-rose-400";
+  return "text-amber-400";
+}
+
+function statusDot(status: string): string {
+  if (status === "success") return "bg-emerald-400";
+  if (status === "error") return "bg-rose-400";
+  return "bg-amber-400";
 }
 
 function EventRow({ event: e }: { event: LogEvent }) {
   return (
-    <div className="flex gap-3 py-0.5 text-[11px] font-mono leading-relaxed">
-      <span className="text-zinc-600 w-20 shrink-0">
+    <div className="group flex items-center gap-3 py-1 px-2 text-[11px] font-mono leading-relaxed rounded-md hover:bg-white/5 transition-colors">
+      <span
+        className={`inline-block w-1.5 h-1.5 rounded-full ${statusDot(e.status)}`}
+        aria-hidden
+      />
+      <span className="text-zinc-500 w-20 shrink-0 tabular-nums">
         {new Date(e.created_at).toLocaleTimeString()}
       </span>
-      <span className="text-blue-400 w-16 shrink-0">{e.agent}</span>
-      <span className="text-zinc-400 w-24 shrink-0 truncate">{e.action}</span>
-      <span className={`w-16 shrink-0 ${statusClass(e.status)}`}>{e.status}</span>
-      <span className="text-zinc-600">{e.duration_ms}ms · {e.tokens_used}tk</span>
+      <span className="text-cyan-300/80 w-16 shrink-0 uppercase tracking-wide">
+        {e.agent}
+      </span>
+      <span className="text-zinc-300 flex-1 truncate">{e.action}</span>
+      <span className={`shrink-0 ${statusClass(e.status)}`}>{e.status}</span>
+      <span className="text-zinc-500 shrink-0 tabular-nums">
+        {e.duration_ms}ms · {e.tokens_used}tk
+      </span>
     </div>
   );
 }
@@ -46,24 +60,40 @@ export function EventsTab() {
           placeholder="Filter by agent / action / trace_id / status"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          className="max-w-md bg-zinc-900 border-zinc-800 text-sm"
+          className="max-w-md bg-white/5 border-white/10 text-sm placeholder:text-zinc-600 focus:border-cyan-500/50"
         />
-        <span className="text-xs text-zinc-500 shrink-0">
-          {filtered.length} events
+        <span className="text-xs text-zinc-500 shrink-0 tabular-nums">
+          {filtered.length} / {events.length} events
         </span>
       </div>
-      <ScrollArea className="flex-1 rounded-md border border-zinc-800 bg-zinc-900/50">
-        <div className="p-3">
-          {filtered.length === 0 && (
-            <p className="text-zinc-500 text-xs py-4 text-center">
-              {events.length === 0
-                ? "Waiting for agent events…"
-                : "No events match the filter."}
-            </p>
+      <ScrollArea className="flex-1 rounded-lg border border-white/5 bg-black/30 backdrop-blur-sm">
+        <div className="p-2">
+          {filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3">
+              <div className="w-14 h-14 rounded-full bg-white/5 border border-white/10 flex items-center justify-center">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              </div>
+              <div className="text-zinc-400 text-sm text-center">
+                {events.length === 0 ? (
+                  <>
+                    <div className="font-medium">No agent activity yet</div>
+                    <div className="text-xs text-zinc-500 mt-1">
+                      CRUZ will log here when any agent runs.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="font-medium">Nothing matches that filter</div>
+                    <div className="text-xs text-zinc-500 mt-1">
+                      Try a broader term or clear the search.
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : (
+            filtered.map((e) => <EventRow key={e.id} event={e} />)
           )}
-          {filtered.map((e) => (
-            <EventRow key={e.id} event={e} />
-          ))}
         </div>
       </ScrollArea>
     </div>

@@ -1,61 +1,103 @@
 @import "tailwindcss";
 
-@layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
-  }
+/*
+ * CRUZ design tokens (dark, production).
+ *
+ * Naming:
+ *   --cruz-bg-*       : surface tiers (deepest → lightest)
+ *   --cruz-fg-*       : text tiers
+ *   --cruz-border-*   : separators
+ *   --cruz-accent-*   : brand cyan
+ *   --cruz-good/warn/bad : semantic status
+ *
+ * Components use tokens via the `@theme` block below so Tailwind
+ * generates utilities like bg-cruz-bg, text-cruz-fg, etc.
+ */
+@theme {
+  --color-cruz-bg: oklch(0.145 0 0);            /* deepest app bg */
+  --color-cruz-surface: oklch(0.18 0.005 260);  /* cards, rails */
+  --color-cruz-surface-2: oklch(0.22 0.007 260); /* hovered */
+  --color-cruz-fg: oklch(0.96 0 0);             /* primary text */
+  --color-cruz-fg-muted: oklch(0.72 0 0);
+  --color-cruz-fg-subtle: oklch(0.52 0 0);
+  --color-cruz-border: oklch(0.28 0.005 260 / 0.6);
+  --color-cruz-border-strong: oklch(0.4 0.01 260);
+  --color-cruz-accent: oklch(0.78 0.13 210);     /* brand cyan */
+  --color-cruz-accent-muted: oklch(0.78 0.13 210 / 0.18);
+  --color-cruz-good: oklch(0.78 0.17 155);       /* emerald */
+  --color-cruz-warn: oklch(0.82 0.14 85);        /* amber */
+  --color-cruz-bad: oklch(0.68 0.22 20);         /* rose */
 
-  .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
-  }
+  --radius-cruz-sm: 6px;
+  --radius-cruz-md: 10px;
+  --radius-cruz-lg: 14px;
+  --radius-cruz-pill: 999px;
+
+  --font-sans:
+    ui-sans-serif, system-ui, "SF Pro Text", "Inter", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
 }
 
 @layer base {
-  * {
-    border-color: hsl(var(--border));
+  html {
+    color-scheme: dark;
   }
   body {
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
     margin: 0;
+    background-color: var(--color-cruz-bg);
+    color: var(--color-cruz-fg);
+    font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  /* Subtle selection + focus ring keyed to brand. */
+  ::selection {
+    background: var(--color-cruz-accent-muted);
+    color: var(--color-cruz-fg);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-cruz-accent);
+    outline-offset: 2px;
+  }
+  /* Scrollbars: a discreet dark track that doesn't compete with content. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.3 0 0 / 0.5);
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.4 0 0 / 0.65);
+  }
+}
+
+/* One-off utility: shimmer used by skeleton loaders. */
+@layer utilities {
+  .animate-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      oklch(0.3 0 0 / 0.35) 40%,
+      oklch(0.3 0 0 / 0.35) 60%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: cruz-shimmer 1.6s ease-in-out infinite;
+  }
+  @keyframes cruz-shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
   }
 }

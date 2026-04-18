@@ -315,3 +315,44 @@ class TestCruzAgentLogging:
 
         call_kwargs = str(mock_log.call_args)
         assert "unique-trace-for-log-test" in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# BaseAgent.log() — Redis publish
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_log_publishes_to_redis_cruz_agent_logs_channel():
+    """BaseAgent.log() publishes each inserted row to redis channel `cruz:agent_logs`."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from agents.base_agent import BaseAgent
+
+    class TinyAgent(BaseAgent):
+        async def process(self, input): ...
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value="INSERT 0 1")
+
+    published = {"calls": []}
+    async def _fake_publish(channel, payload):
+        published["calls"].append((channel, payload))
+
+    fake_redis = MagicMock()
+    fake_redis.publish = AsyncMock(side_effect=_fake_publish)
+
+    with patch("agents.base_agent.get_redis_service") as gr:
+        gr.return_value = fake_redis
+        await TinyAgent().log(
+            db=db, trace_id="t-1", status="success",
+            input_data={"task": "x"}, output_data={"result": "y"},
+            tokens_used=10, duration_ms=42,
+        )
+
+    assert len(published["calls"]) == 1
+    channel, payload = published["calls"][0]
+    assert channel == "cruz:agent_logs"
+    import json as _json
+    parsed = _json.loads(payload)
+    assert parsed["trace_id"] == "t-1"
+    assert parsed["status"] == "success"
+    assert parsed["tokens_used"] == 10

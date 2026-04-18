@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional
 
 from typing_extensions import TypedDict
 
+from services.redis_client import get_redis_service
+
 
 class AgentInput(TypedDict):
     """Structured input passed to every agent."""
@@ -135,6 +137,28 @@ class BaseAgent(ABC):
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
                 "[%s] agent_logs write failed (non-fatal): %s", trace_id, exc
+            )
+
+        # Non-fatal Redis publish — powers the /events SSE stream.
+        try:
+            _redis = get_redis_service()
+            _payload = json.dumps(
+                {
+                    "trace_id": trace_id,
+                    "agent": self.name,
+                    "action": "log",
+                    "status": status,
+                    "input_data": input_data,
+                    "output_data": output_data,
+                    "tokens_used": tokens_used,
+                    "duration_ms": duration_ms,
+                },
+                default=str,
+            )
+            await _redis.publish("cruz:agent_logs", _payload)
+        except Exception as _pub_exc:  # noqa: BLE001
+            self.logger.warning(
+                "[%s] redis publish failed (non-fatal): %s", trace_id, _pub_exc
             )
 
     def handle_error(self, error: Exception, trace_id: str) -> AgentOutput:

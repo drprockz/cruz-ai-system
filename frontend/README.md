@@ -1,73 +1,55 @@
-# React + TypeScript + Vite
+# CRUZ — Command Centre Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 18 + TypeScript 5 + Vite 8 + Tailwind CSS 4 + shadcn/ui.
+PWA-ready, LiveKit voice, 4 tabs: Conversation / Dashboard / Events / Approvals.
 
-Currently, two official plugins are available:
+## Dev
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Backend on `http://localhost:3000` is optional — UI loads gracefully without it.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build      # TypeScript + Vite → dist/
+npm run preview    # serve dist/ at http://localhost:4173
 ```
+
+## Tests
+
+```bash
+npm test                          # Vitest unit tests
+npx playwright install chromium   # one-time (~100 MB)
+npx playwright test               # e2e smoke (starts Vite if not running)
+npx playwright test --headed      # visual mode
+npx playwright show-report        # last HTML report
+```
+
+## Prod (PM2)
+
+```bash
+# from repo root
+cd frontend && npm run build && cd ..
+pm2 start ecosystem.config.js   # starts cruz-api + cruz-worker + cruz-daemon
+pm2 save && pm2 startup          # persist across reboots
+pm2 logs                         # follow all logs
+pm2 reload ecosystem.config.js --update-env   # after .env change
+```
+
+Serve `dist/` via nginx, caddy, or `npx serve dist` — Vite dev server
+is not needed in production.
+
+## Key files
+
+| Path | Purpose |
+|---|---|
+| `src/components/Layout.tsx` | Responsive grid — rails on desktop, drawer on mobile |
+| `src/components/NavDrawer.tsx` | Hamburger Sheet for phone/tablet |
+| `src/components/Orb.tsx` | Animated voice state orb |
+| `src/state/voiceStore.ts` | Zustand voice FSM |
+| `src/hooks/useLiveKitRoom.ts` | LiveKit room connection |
+| `src/lib/api.ts` | Typed fetch wrapper (proxied to `/api`) |
+| `e2e/smoke.spec.ts` | Playwright smoke tests |

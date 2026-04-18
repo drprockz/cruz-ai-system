@@ -1,0 +1,54 @@
+<h2>Which tabs in the center panel?</h2>
+<p class="subtitle">Pick all that feel daily-useful. Click multiple. My recommended set is 1, 2, 3, 5 — skip Settings for now (menu in top bar is enough).</p>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="conversation" onclick="toggleSelect(this)">
+    <div class="letter">1</div>
+    <div class="content">
+      <h3>Conversation <span style="color:#22c55e;font-size:12px">★ default</span></h3>
+      <p>Live transcript: user turns, CRUZ turns, interleaved tool-progress events. Scrollable history of this conversation. Manual text input at the bottom as a fallback when you can't talk (meeting, subway).</p>
+    </div>
+  </div>
+  <div class="option" data-choice="dashboard" onclick="toggleSelect(this)">
+    <div class="letter">2</div>
+    <div class="content">
+      <h3>Dashboard</h3>
+      <p>Widget grid: <b>Today</b> (calendar events, unread emails, open PRs), <b>Agent metrics</b> (turns/day, tokens, est. time saved), <b>System health</b> (DG / LK / PG / Qdrant / Ollama), <b>Upcoming</b> (6am brief, 3am research, scheduled tasks).</p>
+    </div>
+  </div>
+  <div class="option" data-choice="events" onclick="toggleSelect(this)">
+    <div class="letter">3</div>
+    <div class="content">
+      <h3>Events</h3>
+      <p>Live timestamped stream of everything happening in the system: tool calls, tool results, Sonnet token deltas, webhook hits (GitHub/Vercel/Calendar), agent state changes. Grep-able, filterable by agent/trace. Effectively the <code>agent_logs</code> table as a scrolling console.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="agents" onclick="toggleSelect(this)">
+    <div class="letter">4</div>
+    <div class="content">
+      <h3>Agents</h3>
+      <p>Per-agent detail view: what each of the 12 agents has done today, last 10 calls, average latency, token spend, error rate. Clickable to see full agent_logs for that agent. For debugging which specialist is misbehaving.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="approvals" onclick="toggleSelect(this)">
+    <div class="letter">5</div>
+    <div class="content">
+      <h3>Approvals</h3>
+      <p>Pending approval gates across all agents: TITAN deploys, ECHO sends, REACH outreach, MARK publish, SENTINEL fixes. Click Approve / Deny / Preview. Phase 2 this flow also fires FCM push to phone.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="memory" onclick="toggleSelect(this)">
+    <div class="letter">6</div>
+    <div class="content">
+      <h3>Memory</h3>
+      <p>Semantic memory explorer: search past conversations, clicked result loads that conversation into the transcript tab. View procedural preferences (<code>users.preferences</code>). Useful but phase-2 polish — skip for MVP.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="tasks" onclick="toggleSelect(this)">
+    <div class="letter">7</div>
+    <div class="content">
+      <h3>Tasks</h3>
+      <p>ARQ queue + Plane.so mirror: what's pending, what's running, cron schedule. Essentially a read-only task board. Useful once PM agent is heavily used; skip for MVP.</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,139 @@
+<h2>CRUZ Command Center — pick a Mac layout</h2>
+<p class="subtitle">All three use the same tech stack. Phone view is a stripped subset of whichever you pick. Click the one that matches your mental model.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <!-- Layout A: 3-column LiveKit-inspired -->
+      <div style="display:grid;grid-template-columns:1fr 1.3fr 240px;gap:6px;height:280px">
+        <div style="background:#111417;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase">Voice</div>
+          <div style="flex:1;background:#1a1d20;border-radius:4px;display:flex;align-items:center;justify-content:center">
+            <div style="display:flex;gap:3px">
+              <div style="width:4px;height:18px;background:#22c55e;border-radius:2px"></div>
+              <div style="width:4px;height:28px;background:#22c55e;border-radius:2px"></div>
+              <div style="width:4px;height:14px;background:#22c55e;border-radius:2px"></div>
+              <div style="width:4px;height:32px;background:#22c55e;border-radius:2px"></div>
+              <div style="width:4px;height:20px;background:#22c55e;border-radius:2px"></div>
+            </div>
+          </div>
+          <div style="background:#1a1d20;height:30px;border-radius:4px"></div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase">Conversation</div>
+          <div style="background:#1e3a8a;color:#fff;padding:6px;border-radius:4px;font-size:10px;max-width:80%">Deploy AMA to prod</div>
+          <div style="background:#1a1d20;color:#d1d5db;padding:6px;border-radius:4px;font-size:10px;max-width:80%;align-self:flex-end">Running tests first…</div>
+          <div style="background:#1a1d20;color:#d1d5db;padding:6px;border-radius:4px;font-size:10px;max-width:80%;align-self:flex-end">12/12 passing. Deploying.</div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">Agents</div>
+          <div style="font-size:9px;color:#d1d5db;display:flex;flex-direction:column;gap:4px">
+            <div>🟢 forge</div><div>🟢 echo</div><div>🟠 titan (work)</div><div>⚫ qt</div><div>⚫ sentinel</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — 3-Column (LiveKit-inspired)</h3>
+      <p>Voice + waveform | Conversation | Agent list. Clean, familiar, matches the LiveKit Playground fork. Least UI work.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <!-- Layout B: 4-quadrant SOC style -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:6px;height:280px">
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#22c55e;text-transform:uppercase;margin-bottom:4px">● LIVE — Voice</div>
+          <div style="display:flex;gap:3px;height:80px;align-items:center;justify-content:center">
+            <div style="width:4px;height:40px;background:#22c55e"></div>
+            <div style="width:4px;height:60px;background:#22c55e"></div>
+            <div style="width:4px;height:25px;background:#22c55e"></div>
+            <div style="width:4px;height:50px;background:#22c55e"></div>
+          </div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:4px">Active agents</div>
+          <div style="font-size:9px;color:#d1d5db;display:flex;flex-direction:column;gap:3px">
+            <div>🟢 forge · 2 turns</div>
+            <div>🟠 titan · deploying</div>
+            <div>🟢 echo · idle</div>
+            <div>⚫ qt · idle</div>
+          </div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:4px">Current task</div>
+          <div style="font-size:10px;color:#d1d5db;line-height:1.4">
+            <div>▸ Test AMA build</div>
+            <div style="padding-left:10px;color:#22c55e">✓ lint</div>
+            <div style="padding-left:10px;color:#22c55e">✓ pytest</div>
+            <div style="padding-left:10px;color:#f59e0b">▸ playwright</div>
+          </div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:4px">System</div>
+          <div style="font-size:9px;color:#d1d5db;display:grid;grid-template-columns:1fr 1fr;gap:2px">
+            <div>🟢 DG</div><div>🟢 LK</div>
+            <div>🟢 PG</div><div>🟢 RD</div>
+            <div>🟠 QD</div><div>🟢 CL</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — 4-Quadrant SOC</h3>
+      <p>Voice / Agents / Task-tree / System health. Tactical feel, best for monitoring multiple parallel agent jobs. Conversation moves into a collapsible drawer.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <!-- Layout C: Dominant center + sidebars (FRIDAY-ish) -->
+      <div style="display:grid;grid-template-columns:180px 1fr 180px;grid-template-rows:30px 1fr;gap:6px;height:280px">
+        <div style="grid-column:1/-1;background:#111417;border-radius:6px;padding:6px;display:flex;align-items:center;gap:10px;font-size:10px;color:#9ca3af">
+          <span style="color:#22c55e">● CRUZ online</span>
+          <span>Mac · Phone · iPad connected</span>
+          <span style="margin-left:auto">18:47 IST</span>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">12 Agents</div>
+          <div style="font-size:9px;color:#d1d5db;display:flex;flex-direction:column;gap:3px">
+            <div>🟢 cruz</div><div>🟢 forge</div><div>🟢 echo</div><div>🟢 reach</div><div>🟠 titan</div><div>🟢 qt</div>
+            <div>⚫ sentinel</div><div>⚫ pm</div><div>⚫ catch</div><div>⚫ mark</div><div>⚫ raw</div><div>⚫ pulse</div>
+          </div>
+        </div>
+        <div style="background:#0b0d10;border:1px solid #22c55e;border-radius:6px;padding:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;position:relative">
+          <!-- big orb / waveform -->
+          <div style="width:80px;height:80px;border-radius:50%;background:radial-gradient(circle,#22c55e44,#0b0d1000);border:2px solid #22c55e;animation:pulse 2s infinite;display:flex;align-items:center;justify-content:center">
+            <div style="display:flex;gap:3px;align-items:center">
+              <div style="width:3px;height:16px;background:#22c55e"></div>
+              <div style="width:3px;height:24px;background:#22c55e"></div>
+              <div style="width:3px;height:12px;background:#22c55e"></div>
+              <div style="width:3px;height:28px;background:#22c55e"></div>
+            </div>
+          </div>
+          <div style="font-size:12px;color:#d1d5db;text-align:center">"12 of 12 tests passing.<br/>Deploying to production."</div>
+          <div style="position:absolute;bottom:8px;left:12px;right:12px;font-size:9px;color:#6b7280;display:flex;justify-content:space-between">
+            <span>Listening...</span><span>2.1s latency</span>
+          </div>
+        </div>
+        <div style="background:#111417;border-radius:6px;padding:8px">
+          <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">Pending</div>
+          <div style="font-size:9px;color:#d1d5db;display:flex;flex-direction:column;gap:4px">
+            <div style="color:#f59e0b">⚠ Deploy approval</div>
+            <div>✉ Draft to Ateet</div>
+            <div>📰 Brief · 6 AM</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — FRIDAY-style Orb Center</h3>
+      <p>Big animated voice-orb in the middle, agents rail left, tasks rail right, top bar shows system. Most "Iron Man" feel. Conversation history available as slide-over.</p>
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); } 50% { box-shadow: 0 0 30px 10px rgba(34,197,94,0.2); } }
+</style>

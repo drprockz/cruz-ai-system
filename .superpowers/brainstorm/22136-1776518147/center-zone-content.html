@@ -1,0 +1,112 @@
+<h2>What fills the center zone around the orb?</h2>
+<p class="subtitle">Left rail (agents) and right rail (pending) are fixed. Top bar (system) is fixed. Question is what the big middle panel shows while CRUZ is idle AND during a conversation.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <div style="height:280px;display:flex;flex-direction:column;gap:8px">
+        <div style="background:#111417;height:28px;border-radius:4px;padding:6px;font-size:9px;color:#9ca3af">● Online · Mac · 18:47 IST · all systems green</div>
+        <div style="flex:1;background:#0b0d10;border:1px solid #22c55e44;border-radius:6px;padding:12px;display:flex;flex-direction:column;align-items:center;gap:8px;justify-content:center">
+          <div style="width:70px;height:70px;border-radius:50%;background:radial-gradient(circle,#22c55e44,#0b0d1000);border:2px solid #22c55e;display:flex;align-items:center;justify-content:center">
+            <div style="display:flex;gap:2px"><div style="width:3px;height:16px;background:#22c55e"></div><div style="width:3px;height:26px;background:#22c55e"></div><div style="width:3px;height:14px;background:#22c55e"></div><div style="width:3px;height:22px;background:#22c55e"></div></div>
+          </div>
+          <div style="font-size:12px;color:#d1d5db">Ready.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Minimalist (orb only)</h3>
+      <p>Big orb + "Ready" / current sentence. Everything else lives in side rails and slide-overs. Cleanest FRIDAY feel. But lots of unused screen real estate on a 24" monitor.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <div style="height:280px;display:flex;flex-direction:column;gap:6px">
+        <div style="background:#111417;height:22px;border-radius:4px;padding:4px;font-size:9px;color:#9ca3af">● CRUZ · 18:47 · all green</div>
+        <div style="flex:0 0 100px;background:#0b0d10;border:1px solid #22c55e44;border-radius:6px;display:flex;align-items:center;justify-content:center;gap:12px">
+          <div style="width:50px;height:50px;border-radius:50%;border:2px solid #22c55e;display:flex;align-items:center;justify-content:center">
+            <div style="display:flex;gap:2px"><div style="width:3px;height:14px;background:#22c55e"></div><div style="width:3px;height:22px;background:#22c55e"></div><div style="width:3px;height:10px;background:#22c55e"></div></div>
+          </div>
+          <div style="font-size:11px;color:#d1d5db">"Deploying to prod..."</div>
+        </div>
+        <div style="flex:1;background:#111417;border-radius:6px;padding:8px;overflow:hidden">
+          <div style="font-size:9px;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">Transcript</div>
+          <div style="font-size:10px;line-height:1.5;display:flex;flex-direction:column;gap:4px">
+            <div><span style="color:#60a5fa">You:</span> <span style="color:#d1d5db">Deploy AMA to prod</span></div>
+            <div><span style="color:#22c55e">CRUZ:</span> <span style="color:#d1d5db">Running tests first.</span></div>
+            <div style="color:#6b7280;font-size:9px">→ qt: running pytest (3.2s)</div>
+            <div style="color:#6b7280;font-size:9px">→ qt: 12/12 passing</div>
+            <div><span style="color:#22c55e">CRUZ:</span> <span style="color:#d1d5db">Tests pass. Deploying.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Orb + Live Transcript</h3>
+      <p>Orb compact at top, big scrolling transcript below (user lines, CRUZ lines, and tool-progress events interleaved). Best for "see what's happening" during a turn.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <div style="height:280px;display:flex;flex-direction:column;gap:6px">
+        <div style="background:#111417;height:22px;border-radius:4px;padding:4px;font-size:9px;color:#9ca3af">● CRUZ · 18:47 · all green</div>
+        <div style="flex:0 0 80px;background:#0b0d10;border:1px solid #22c55e44;border-radius:6px;display:flex;align-items:center;justify-content:center;gap:10px">
+          <div style="width:40px;height:40px;border-radius:50%;border:2px solid #22c55e;display:flex;align-items:center;justify-content:center"><div style="display:flex;gap:2px"><div style="width:2px;height:12px;background:#22c55e"></div><div style="width:2px;height:18px;background:#22c55e"></div></div></div>
+          <div style="font-size:10px;color:#d1d5db">"Deploying..."</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:1">
+          <div style="background:#111417;border-radius:6px;padding:6px">
+            <div style="font-size:9px;color:#9ca3af;text-transform:uppercase">Transcript</div>
+            <div style="font-size:9px;color:#d1d5db;margin-top:4px">You: Deploy AMA<br/>CRUZ: Running tests<br/>CRUZ: Tests pass</div>
+          </div>
+          <div style="background:#111417;border-radius:6px;padding:6px">
+            <div style="font-size:9px;color:#9ca3af;text-transform:uppercase">Today</div>
+            <div style="font-size:9px;color:#d1d5db;margin-top:4px">📅 3 meetings<br/>📧 7 emails<br/>🔀 2 PRs waiting<br/>📦 AMA deploy</div>
+          </div>
+          <div style="background:#111417;border-radius:6px;padding:6px">
+            <div style="font-size:9px;color:#9ca3af;text-transform:uppercase">Agent activity</div>
+            <div style="font-size:9px;color:#d1d5db;margin-top:4px">qt: ✓ 12 tests<br/>titan: ▸ deploy<br/>pulse: brief ready</div>
+          </div>
+          <div style="background:#111417;border-radius:6px;padding:6px">
+            <div style="font-size:9px;color:#9ca3af;text-transform:uppercase">Metrics</div>
+            <div style="font-size:9px;color:#d1d5db;margin-top:4px">42 turns today<br/>$0.73 spent<br/>4.2hr saved est</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — Orb + Dashboard grid</h3>
+      <p>Small orb on top, 2x2 widget grid below: transcript, today's events, agent activity, metrics. Most "command center". Widgets can be rearranged.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="d" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0b0d10;padding:14px">
+      <div style="height:280px;display:flex;flex-direction:column;gap:6px">
+        <div style="background:#111417;height:22px;border-radius:4px;padding:4px;font-size:9px;color:#9ca3af">● CRUZ · 18:47 · all green</div>
+        <div style="flex:0 0 110px;background:#0b0d10;border:1px solid #22c55e44;border-radius:6px;display:flex;align-items:center;justify-content:center;gap:14px;position:relative">
+          <div style="width:70px;height:70px;border-radius:50%;border:2px solid #22c55e;display:flex;align-items:center;justify-content:center"><div style="display:flex;gap:3px"><div style="width:3px;height:18px;background:#22c55e"></div><div style="width:3px;height:28px;background:#22c55e"></div><div style="width:3px;height:14px;background:#22c55e"></div><div style="width:3px;height:22px;background:#22c55e"></div></div></div>
+          <div style="font-size:11px;color:#d1d5db">"Deploying AMA to production..."</div>
+        </div>
+        <div style="flex:1;background:#111417;border-radius:6px;padding:8px;overflow:hidden">
+          <div style="font-size:9px;color:#9ca3af;text-transform:uppercase;margin-bottom:4px">Live event stream</div>
+          <div style="font-size:9px;color:#d1d5db;font-family:monospace;line-height:1.5">
+            <div><span style="color:#60a5fa">18:47:02</span> cruz.stream_response started</div>
+            <div><span style="color:#60a5fa">18:47:03</span> tool.call qt running pytest</div>
+            <div><span style="color:#22c55e">18:47:06</span> tool.result qt 12/12 pass</div>
+            <div><span style="color:#60a5fa">18:47:07</span> tool.call titan vercel deploy</div>
+            <div><span style="color:#f59e0b">18:47:08</span> vercel.build start</div>
+            <div><span style="color:#22c55e">18:47:24</span> vercel.build success</div>
+            <div><span style="color:#22c55e">18:47:25</span> titan.done url=ama.in</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>D — Orb + Live event console</h3>
+      <p>Orb with current sentence at top, live timestamped event stream below (agent calls, tool results, webhook hits). Feels most like a real ops console / dev terminal. Best for debugging + monitoring.</p>
+    </div>
+  </div>
+</div>

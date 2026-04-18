@@ -488,6 +488,25 @@ async def command(request: CommandRequest):
 # GET /logs/{trace_id} — full execution trace for a single request
 # ---------------------------------------------------------------------------
 
+@app.get("/explain/{trace_id}")
+async def explain_trace(trace_id: str) -> JSONResponse:
+    """
+    Human-readable reasoning chain for a trace_id.
+
+    Stitches all agent_logs rows into a summary + per-step breakdown so the
+    user (or CRUZ itself) can answer "why did you do that?".
+    """
+    from agents.cruz.persona.explainability import build_explanation
+    db = get_db_service()
+    ex = await build_explanation(db, trace_id)
+    if ex is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"no logs for trace_id {trace_id}"},
+        )
+    return JSONResponse(ex.to_dict())
+
+
 @app.get("/logs/{trace_id}")
 async def get_logs(trace_id: str) -> JSONResponse:
     """

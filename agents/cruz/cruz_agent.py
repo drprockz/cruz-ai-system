@@ -420,6 +420,30 @@ class CruzAgent(BaseAgent):
                 )
                 max_reply_tokens = 512
 
+            # Persona v1 augmentation — wraps the base prompt with identity,
+            # response-style hint, humor permission and (if available) user
+            # profile summary.  Fully wrapped in try/except: if persona fails
+            # for any reason, we fall back to the raw prompt.
+            try:
+                from agents.cruz.persona import PersonaLayer
+                from agents.cruz.persona.relationship_memory import quick_profile
+                try:
+                    profile = await quick_profile(db, user_id="darshan")
+                except Exception:
+                    profile = None
+                system_prompt = PersonaLayer.get().augment_system_prompt(
+                    base=system_prompt,
+                    task=input["task"],
+                    device=device,
+                    now=now,
+                    profile=profile,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] persona augmentation skipped (non-fatal): %s",
+                    input["trace_id"], exc,
+                )
+
             # Agentic loop: continue until end_turn or approval gate hit
             while True:
                 response = await llm_chat(
@@ -444,16 +468,24 @@ class CruzAgent(BaseAgent):
                     )
                     # Store both turns in semantic memory for future retrieval
                     try:
+                        # PII redaction before long-term memory. Non-fatal if missing.
+                        try:
+                            from agents.cruz.persona import PersonaLayer as _PL
+                            _p = _PL.get()
+                            _u = _p.sanitize_for_memory(input["task"])
+                            _t = _p.sanitize_for_memory(text)
+                        except Exception:
+                            _u, _t = input["task"], text
                         await sem_service.store(
                             id=str(_uuid.uuid4()),
                             role="user",
-                            content=input["task"],
+                            content=_u,
                             conversation_id=conversation_id,
                         )
                         await sem_service.store(
                             id=str(_uuid.uuid4()),
                             role="assistant",
-                            content=text,
+                            content=_t,
                             conversation_id=conversation_id,
                         )
                     except Exception as exc:
@@ -666,6 +698,27 @@ class CruzAgent(BaseAgent):
                 "No markdown, no lists."
             )
 
+        # Persona v1 augmentation — same pattern as process(). Fail-soft.
+        try:
+            from agents.cruz.persona import PersonaLayer
+            from agents.cruz.persona.relationship_memory import quick_profile
+            try:
+                profile = await quick_profile(db, user_id="darshan")
+            except Exception:
+                profile = None
+            system_prompt = PersonaLayer.get().augment_system_prompt(
+                base=system_prompt,
+                task=task,
+                device=device,
+                now=now,
+                profile=profile,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] persona augmentation skipped in stream_response: %s",
+                trace_id, exc,
+            )
+
         # Buffer all sentences for persistence + faithful history rebuild.
         final_text_parts: List[str] = []
 
@@ -748,13 +801,20 @@ class CruzAgent(BaseAgent):
                 assistant_result=final_text,
             )
             try:
+                try:
+                    from agents.cruz.persona import PersonaLayer as _PL
+                    _p = _PL.get()
+                    _u = _p.sanitize_for_memory(task)
+                    _t = _p.sanitize_for_memory(final_text)
+                except Exception:
+                    _u, _t = task, final_text
                 await sem_service.store(
                     id=str(_uuid.uuid4()), role="user",
-                    content=task, conversation_id=conversation_id,
+                    content=_u, conversation_id=conversation_id,
                 )
                 await sem_service.store(
                     id=str(_uuid.uuid4()), role="assistant",
-                    content=final_text, conversation_id=conversation_id,
+                    content=_t, conversation_id=conversation_id,
                 )
             except Exception as exc:
                 logger.warning(

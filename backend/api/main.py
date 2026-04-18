@@ -10,7 +10,7 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Literal, Optional
 
 import anthropic
 import psycopg2
@@ -983,6 +983,109 @@ async def dashboard() -> JSONResponse:
             ],
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /approvals — list pending (or any state) approval requests
+# POST /approvals/:id/approve — approve a pending action
+# POST /approvals/:id/deny   — deny a pending action
+# ---------------------------------------------------------------------------
+
+class ApprovalRow(BaseModel):
+    """Shape of a row in the approval_requests table."""
+
+    id: str
+    trace_id: str
+    agent: str
+    action: str
+    payload: Any
+    state: str
+    requested_at: Any
+    responded_at: Optional[Any] = None
+    expires_at: Any
+
+
+@app.get("/approvals", response_model=list[ApprovalRow])
+async def list_approvals(state: str = "pending", limit: int = 25):
+    """
+    List approval requests filtered by state.
+
+    Query params:
+      state  — "pending" | "approved" | "denied" (default: "pending")
+      limit  — max rows to return (default: 25, max: 200)
+
+    Returns a list of ApprovalRow objects ordered newest-first.
+    Always 200 — unknown state yields an empty list.
+    """
+    db = get_db_service()
+    rows = await db.fetch(
+        "SELECT id, trace_id, agent, action, payload, state, "
+        "requested_at, responded_at, expires_at "
+        "FROM approval_requests WHERE state = $1 "
+        "ORDER BY requested_at DESC LIMIT $2",
+        state,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def _respond_to_approval(
+    approval_id: str,
+    new_state: Literal["approved", "denied"],
+) -> dict:
+    """
+    Shared logic for approve + deny actions.
+
+    1. UPDATE approval_requests SET state = new_state, responded_at = NOW()
+    2. Publish {state} to redis channel ``cruz:approval:<id>`` (non-fatal)
+    3. Return {"state": new_state}
+    """
+    db = get_db_service()
+    redis_svc = get_redis_service()
+
+    await db.execute(
+        "UPDATE approval_requests SET state = $1, responded_at = NOW() "
+        "WHERE id = $2",
+        new_state,
+        approval_id,
+    )
+
+    try:
+        await redis_svc.publish(
+            f"cruz:approval:{approval_id}",
+            json.dumps({"state": new_state}),
+        )
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "approval publish failed (non-fatal): %s", exc
+        )
+
+    return {"state": new_state}
+
+
+@app.post("/approvals/{approval_id}/approve")
+async def approve_approval(approval_id: str) -> JSONResponse:
+    """
+    Approve a pending action.
+
+    200 — {"state": "approved"}
+    Publishes to ``cruz:approval:<id>`` so waiting agents can unblock.
+    """
+    result = await _respond_to_approval(approval_id, "approved")
+    return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/approvals/{approval_id}/deny")
+async def deny_approval(approval_id: str) -> JSONResponse:
+    """
+    Deny a pending action.
+
+    200 — {"state": "denied"}
+    Publishes to ``cruz:approval:<id>`` so waiting agents can unblock.
+    """
+    result = await _respond_to_approval(approval_id, "denied")
+    return JSONResponse(status_code=200, content=result)
 
 
 if __name__ == "__main__":

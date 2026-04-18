@@ -27,6 +27,8 @@ Ship a single responsive web app at `http://localhost:5173` (dev) / `https://cru
 - Always-listening wake word in the browser tab
 - Voice-only approval flows (those ship in voice-pipeline Phase 2 via FCM)
 - User authentication with multi-tenant (single user: `darshan`; auth is Phase 2)
+- **Mobile approval gate UX** — Phase 1 phone shows a "check Mac to approve" message. Real approval UX on phone requires FCM, deferred to voice-pipeline Phase 2.
+- AgentsTab, MemoryTab, TasksTab — deferred to Phase 2 to keep bundle small and scope realistic for one sprint.
 
 ## 4. Architecture
 
@@ -151,7 +153,7 @@ frontend/                              # NEW top-level dir
 |---|---|---|
 | Layout | Orb center + left agent rail + right pending rail + top system bar | Most "FRIDAY"; chosen in option C from layout screen |
 | Center zone | Tabs (one panel at a time, full-width) | Chosen option B from center-zone-combo screen; avoids cramming on any device |
-| Tab set | 7: Conversation (default), Dashboard, Events, Agents, Approvals, Memory, Tasks | User picked all 7 |
+| Tab set | 7 planned. Phase 1 ships 4: Conversation (default), Dashboard, Events, Approvals. Phase 2: Agents, Memory, Tasks (scope cut per spec-review feedback on bundle size + timeline) | User picked all 7 in brainstorm; Phase 1 cut is pragmatic, all 7 in Phase 2 |
 | Phone view | Voice-only minimal: orb + transcript + PTT + FCM for approvals | Phone is glance-and-talk; tabs would be overkill on 6" |
 | iPad view | Side rail with 5 tabs: Conversation, Dashboard, Events, Agents, Approvals | iPad is a work surface; Memory + Tasks deferred to Mac |
 | Mac view | Full: top bar + left agent rail + right pending rail + 7 tabs | Desk use, 24" monitor, maximum info density |
@@ -170,18 +172,31 @@ Live feed of every `agent_logs` row as it's inserted. Used by `EventsTab`.
 Events emitted (server → client):
 
 ```
+event: replay
+data: [{"id":1234, ...}, {"id":1235, ...}, ...]    // up to last 50, newest-last, on initial connect
+
 event: log
-data: {"trace_id":"...", "agent":"qt", "action":"test", "status":"success",
+data: {"id":1236, "trace_id":"...", "agent":"qt", "action":"test", "status":"success",
        "duration_ms":3214, "tokens_used":0, "created_at":"2026-04-18T18:47:06Z"}
+
+event: sync
+data: {"last_id": 1235}    // after replay flushes, signals client is caught up
 
 event: ping
 data: {"t": 1776518147}      // every 25s to keep connection alive
 ```
 
-**Implementation** — Postgres `LISTEN`/`NOTIFY` is overkill; simpler approach:
-- Add a Redis pub/sub channel `cruz:agent_logs` — `BaseAgent.log()` publishes after insert
-- `/events` endpoint subscribes to the channel and yields SSE events
-- On client reconnect, first emit a `replay` event with last 50 logs from DB so the client catches up
+**Reconnect**: client sends `?last_id=1235` query — server emits only logs newer than that, then `event: sync`.
+
+**Implementation** — Redis pub/sub channel `cruz:agent_logs`:
+1. **Modify `agents/base_agent.py::BaseAgent.log()`** — after the DB insert succeeds, publish the same row (as JSON) to Redis channel `cruz:agent_logs`. Non-fatal on publish failure (just log a warning). This is an invasive change to a widely-used method; must land in the same PR as the `/events` endpoint.
+2. **`GET /events`** endpoint creates a FastAPI `StreamingResponse` that:
+   - Reads `last_id` from query (default: fetch last 50 from DB)
+   - Emits `event: replay` with those logs
+   - Subscribes to `cruz:agent_logs` channel via `redis.asyncio`
+   - Yields each message as `event: log`, emits `event: ping` every 25s
+   - Closes cleanly on client disconnect
+3. Verify `FastAPI.StreamingResponse` + `redis.asyncio.pubsub` compose without blocking the event loop — this repo already uses `StreamingResponse` for `/command` SSE at `backend/api/main.py` lines 373–420, so the pattern is known-good.
 
 ### 8.2 `GET /dashboard` — aggregated Dashboard payload
 
@@ -232,19 +247,30 @@ POST /approvals/:id/deny
 → publishes Redis `cruz:approval:<id>` so the waiting tool-call unblocks
 ```
 
-### 8.4 No changes to `/command` or `/voice/token`
+### 8.4 Reused existing endpoints (no changes)
 
-Web UI uses existing endpoints as-is.
+- `GET /health` — system health for SystemBar + DashboardTab
+- `GET /agents/status` — agent rail live state (already exists in `main.py`)
+- `POST /command` + SSE — fallback when LiveKit is unavailable
+- `POST /voice/token` — LiveKit JWT minting (already exists)
+- `GET /conversations/:id/messages` — transcript history on load
+- `GET /logs/:trace_id` — drill-in from EventsTab
+- `GET /tasks` — (available, deferred to Phase 2 TasksTab)
 
 ## 9. Voice flow in the web app
 
 ### 9.1 Mac (wake word still via daemon)
 
+**Prerequisite:** the Mac daemon (`scripts/voice/livekit_client.py`) must be running. Today it's started manually. **Phase 1 adds a `cruz-daemon` process to `ecosystem.config.js`** so PM2 keeps it alive alongside `cruz-api` and `cruz-worker`.
+
 1. Daemon hears "Hey Jarvis" → unmutes mic → streams to worker via LiveKit room.
 2. Web UI is already in the same room (joined on page load). It subscribes to the daemon's audio track and displays a waveform when the user is talking.
-3. Worker transcribes → runs CRUZ → streams sentences back. UI subscribes to the agent's audio track, plays it through browser speakers (if browser has audio focus) or lets the daemon's speakers play it (if browser doesn't).
+3. Worker transcribes → runs CRUZ → streams sentences back. UI receives the agent audio track.
 
-To avoid double-audio (both browser and Mac speakers playing CRUZ): the web UI **only plays audio when it has focus**; otherwise it mutes its receiver track and leaves audio to the daemon.
+**Audio policy (simplified per spec review):**
+- The **daemon owns audio output** on Mac (it's the always-on service with the speakers).
+- The web UI is **visual only** on Mac — subscribes to the agent's audio track for waveform visualization but does not play it through browser speakers. A "Mute daemon" toggle in Settings lets power users flip the policy if they work headless.
+- This eliminates any double-audio race. Phone/iPad don't have a daemon, so the web UI plays audio directly.
 
 ### 9.2 Phone / iPad (PTT)
 
@@ -310,38 +336,42 @@ Breakpoints via `useDevice()` hook (`window.matchMedia`), not Tailwind `md:` alo
 
 ## 14. Performance budget
 
-- First-load JS bundle: ≤ 250 KB gzip (phone cellular friendly)
-- Time to Interactive on Mac: ≤ 1.2 s (localhost)
+- First-load JS bundle **(app shell + critical path)**: ≤ 300 KB gzip. `livekit-client` is ~200 KB gzip on its own, so lazy-loading non-critical tabs is mandatory.
+- Each tab **lazy-imported** via `React.lazy()` — only Conversation loads on first paint. Dashboard / Events / Approvals load on first tab switch.
+- Time to Interactive on Mac localhost: ≤ 1.5 s
 - Orb state-change → visual update: ≤ 50 ms
 - SSE event → EventsTab render: ≤ 100 ms
 - PTT press → LiveKit publishing: ≤ 150 ms
+- **Contingency**: if shell exceeds 300 KB gzip, also lazy-load `@livekit/components-react` behind the Conversation tab so phone bundle drops to ~100 KB.
 
 ## 15. Rollout plan
 
 ### Phase 1 (this sprint — 4–6 days of autonomous implementation)
 
-**Must ship (MVP, Mac only):**
-1. Project scaffold (Vite + React + TS + Tailwind + shadcn)
-2. Layout + SystemBar + AgentRail + PendingRail stubs
-3. Orb with 5 states + animations
-4. LiveKit room join via `/voice/token`, track subscription
-5. ConversationTab: live transcript from LiveKit data channel + SSE events
-6. EventsTab: SSE stream reader
-7. PWA config + manifest
-8. One Playwright e2e
-9. `GET /events` SSE endpoint in backend
-10. `GET /dashboard` endpoint + DashboardTab widgets (Today is empty except system_health)
-11. `GET /approvals` endpoint + ApprovalsTab
-12. Responsive breakpoints: phone + tablet + desktop work
-13. README + npm scripts
+**Must ship (MVP):**
+1. `frontend/` project scaffold (Vite + React + TS + Tailwind + shadcn)
+2. Layout + SystemBar + AgentRail + PendingRail
+3. Orb with 5 states + animations (Framer Motion)
+4. LiveKit room join via `/voice/token`, subscribe to agent audio track
+5. ConversationTab: live transcript from SSE `/events` + text input fallback
+6. DashboardTab: `/dashboard` payload → 4 widgets (Today stub, Metrics, System health, Upcoming)
+7. EventsTab: SSE stream reader with filter + `last_id` reconnect
+8. ApprovalsTab: list + Approve/Deny actions (Mac primary; phone shows "check Mac")
+9. Backend: `BaseAgent.log()` publishes to Redis channel `cruz:agent_logs` (invasive change — tests updated)
+10. Backend: `GET /events`, `GET /dashboard`, `GET /approvals`, `POST /approvals/:id/{approve|deny}` endpoints + pytest
+11. PWA config + manifest + install icons
+12. Responsive breakpoints: phone + tablet + desktop verified
+13. PM2 config gains `cruz-daemon` entry; README docs dev + prod launch
+14. One Playwright e2e smoke
 
 **Deferred to Phase 2 (next sprint):**
-- AgentsTab full (per-agent detail view)
+- AgentsTab (per-agent detail view)
 - MemoryTab (Qdrant search UI)
 - TasksTab (ARQ + Plane mirror)
-- Waveform component (orb alone is fine v1)
+- Waveform component (use orb alone v1)
 - PWA offline cache beyond shell
-- Auth
+- Auth + JWT middleware
+- FCM push for mobile approvals
 
 ### Phase 2 (next sprint)
 

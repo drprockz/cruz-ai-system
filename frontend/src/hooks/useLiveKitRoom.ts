@@ -43,6 +43,20 @@ function _notify() {
   _listeners.forEach((l) => l());
 }
 
+// Data channel contract — must match workers/voice_agent/worker.py
+// _publish_voice_msg and docs/superpowers/specs/2026-04-19-voice-mode-and-ui-polish.md
+export type CruzVoiceMsg =
+  | { type: "stt_interim"; text: string }
+  | { type: "stt_final"; text: string }
+  | { type: "reply_chunk"; text: string; trace_id: string }
+  | { type: "reply_done"; trace_id: string };
+
+const _dataListeners = new Set<(msg: CruzVoiceMsg) => void>();
+export function onCruzVoiceMsg(cb: (msg: CruzVoiceMsg) => void): () => void {
+  _dataListeners.add(cb);
+  return () => _dataListeners.delete(cb);
+}
+
 async function _ensureRoom(deviceId: string): Promise<Room> {
   if (_state.room && _state.deviceId === deviceId) return _state.room;
   if (_state.connecting) return _state.connecting;
@@ -110,6 +124,23 @@ async function _ensureRoom(deviceId: string): Promise<Room> {
       _state.deviceId = null;
       _state.connecting = null;
       _notify();
+    });
+
+    // Data channel: worker publishes interim/final STT + reply chunks here.
+    r.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
+      try {
+        const text = new TextDecoder().decode(payload);
+        const msg = JSON.parse(text) as CruzVoiceMsg;
+        _dataListeners.forEach((cb) => {
+          try {
+            cb(msg);
+          } catch (err) {
+            console.error("[cruz] data listener threw", err);
+          }
+        });
+      } catch (err) {
+        console.warn("[cruz] malformed data-channel msg", err);
+      }
     });
 
     console.log("[cruz] connecting LiveKit room:", tok.room, "@", tok.ws_url);
@@ -250,10 +281,50 @@ export function useLiveKitRoom(deviceId: string) {
       }
     });
 
+  // Continuous voice-mode: unmute once, keep mic hot until exit.
+  // Deepgram's 500ms endpointing + worker barge-in handle turn-taking;
+  // the browser just publishes audio continuously.
+  const enterVoiceMode = () =>
+    _serialize(async () => {
+      const r = _state.room ?? (await _ensureRoom(deviceId));
+      try {
+        await r.startAudio();
+      } catch {
+        /* ok */
+      }
+      if (!_mic.track) {
+        _mic.track = await createLocalAudioTrack({
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        });
+      }
+      if (!_mic.published) {
+        await r.localParticipant.publishTrack(_mic.track);
+        _mic.published = true;
+      }
+      await _mic.track.unmute();
+      console.log("[cruz] voice mode entered — mic hot");
+    });
+
+  const exitVoiceMode = () =>
+    _serialize(async () => {
+      if (_mic.track) {
+        try {
+          await _mic.track.mute();
+        } catch {
+          /* ok */
+        }
+      }
+      console.log("[cruz] voice mode exited — mic muted");
+    });
+
   return {
     room: _state.room,
     connected: _state.connected,
     startPTT,
     stopPTT,
+    enterVoiceMode,
+    exitVoiceMode,
   };
 }

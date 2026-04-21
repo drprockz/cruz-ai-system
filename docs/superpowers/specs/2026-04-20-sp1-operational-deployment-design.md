@@ -51,26 +51,27 @@ Two kinds of work: **active** (install, configure, validate) and **passive** (wa
 | Task | Command / artifact | Done when |
 |---|---|---|
 | Pull Ollama models (start first — long download) | `ollama pull qwen2.5-coder:14b && ollama pull llama3.1:8b` | ~25GB on disk; `ollama list` shows both |
-| Audit `.env` against `.env.example` | Python one-liner from readiness checklist | `MISSING: none` |
+| Audit `.env` against `.env.example` | Python one-liner from readiness checklist | `MISSING: none` (note: `.env.example` currently omits `TELEGRAM_CHAT_ID`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_DRIVE_FOLDER_ID` — SP1 will add these to `.env.example` as part of Track B/C, see Section 2 Track C) |
 | Start full stack via existing launcher | `./scripts/start-cruz.sh` | `pm2 status` shows all 5 apps `online` |
-| Register PM2 with launchd | `pm2 save && pm2 startup` (run printed sudo command once) | PM2 processes survive a test reboot (`sudo reboot now` + verify auto-start) |
+| Register PM2 with launchd | `pm2 save && pm2 startup` (run printed sudo command once) | PM2 processes survive a test reboot (`sudo reboot now` + verify auto-start). **Warning:** save any unsaved work first — this is the one SP1 action that loses in-flight state. |
 | Qdrant container up | `docker compose up -d qdrant` | `curl localhost:6333/readyz` returns ready |
 | Local `/health` all-green | `curl -s localhost:3000/health \| jq` | `.ollama.missing == []`, every service reports connected |
 | Real-DB integration tests pass | `DATABASE_URL_TEST=postgresql+asyncpg://cruz:cruz@localhost:5432/cruz_test pytest tests/integration/ -v` | All green |
 
 ### Day 2 — External services (three parallelizable tracks)
 
-**Track A — Cloudflare Tunnel.**
+**Track A — Cloudflare Tunnel.** (Reference: `docs/cloudflare/setup.md`.)
 
 1. Install cloudflared: `brew install cloudflared`
 2. Authenticate: `cloudflared tunnel login` (opens browser)
 3. Create tunnel: `cloudflared tunnel create cruz` — save the UUID
 4. Route DNS: `cloudflared tunnel route dns cruz cruz.simpleinc.cloud`
-5. Fill `cloudflared/config.yml` with the tunnel UUID + ingress rules (template exists per Session C)
-6. Validate config: `cloudflared tunnel ingress validate`
-7. Smoke-test in foreground first: `cloudflared tunnel run cruz` → `curl https://cruz.simpleinc.cloud/health` from a different network
-8. Install as service: `sudo cloudflared service install`
-9. Verify service running: `launchctl list | grep cloudflared`
+5. Verify DNS propagation: `dig cruz.simpleinc.cloud +short` returns a Cloudflare IP (this is the single failure mode that most often wastes hours and is invisible to `cloudflared tunnel ingress validate`)
+6. Fill `cloudflared/config.yml` with the tunnel UUID + ingress rules (template exists per Session C)
+7. Validate config: `cloudflared tunnel ingress validate`
+8. Smoke-test in foreground first: `cloudflared tunnel run cruz` → `curl https://cruz.simpleinc.cloud/health` from a different network
+9. Install as service: `sudo cloudflared service install`
+10. Verify service running: `launchctl list | grep cloudflared`
 
 **Done when** `curl https://cruz.simpleinc.cloud/health` returns green from cellular (phone off WiFi).
 
@@ -79,11 +80,18 @@ Two kinds of work: **active** (install, configure, validate) and **passive** (wa
 1. Message `@BotFather` on Telegram → `/newbot` → save the token
 2. Start a chat with your new bot, send any message
 3. Fetch `chat_id`: `curl https://api.telegram.org/bot<TOKEN>/getUpdates` → pick `result[0].message.chat.id`
-4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`
-5. Reload env: `pm2 reload ecosystem.config.js --update-env`
-6. Send manual test alert from a Python REPL or via `services/alerts.py`
+4. Add `TELEGRAM_CHAT_ID` key to `.env.example` (currently missing — one-line config file edit)
+5. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`
+6. Reload env: `pm2 reload ecosystem.config.js --update-env`
+7. Send manual test alert via `services/alerts.py`:
+   ```bash
+   python -c "import asyncio; from services.alerts import get_alert_service; asyncio.run(get_alert_service().notify('info', 'SP1 test', 'manual alert from Track B'))"
+   ```
+   (Method is `AlertService.notify(severity, title, message)` per `services/alerts.py:37`.)
 
 **Done when** a test alert DM arrives on your phone within 10 seconds.
+
+**Track B is a prerequisite for the Day 3 induced-outage test** (see Section 5). If Track B is skipped, the Day 3 gate cannot pass.
 
 **Track C — Google Drive backup.**
 
@@ -91,12 +99,16 @@ Two kinds of work: **active** (install, configure, validate) and **passive** (wa
 2. Enable Drive API in the project console
 3. Create a service account → download JSON key to `~/.config/cruz/gdrive-sa.json` (or equivalent path outside the repo)
 4. Create a Drive folder (e.g., "CRUZ Backups"); copy its folder ID from the URL
-5. Share the folder with the service account's email as **Editor** (not Viewer)
-6. Set `GDRIVE_SERVICE_ACCOUNT_JSON` (path to JSON) and `GDRIVE_FOLDER_ID` in `.env`
-7. Reload env: `pm2 reload ecosystem.config.js --update-env`
-8. Trigger a manual backup (confirm exact invocation during SP1 — likely via `arq` enqueue or `python -m workers.tasks.backup_tasks`)
+5. Share the folder with the service account's email as **Editor** (not Viewer — Viewer is a silent-failure trap)
+6. Add `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_DRIVE_FOLDER_ID` keys to `.env.example` (both currently missing — one-line config file edit)
+7. Set `GOOGLE_APPLICATION_CREDENTIALS` (absolute path to the JSON key) and `GOOGLE_DRIVE_FOLDER_ID` (the folder ID) in `.env` — these match `services/backup.py:119,130` exactly
+8. Reload env: `pm2 reload ecosystem.config.js --update-env`
+9. Trigger a manual backup. The `backup_tasks` module has no `__main__` block, so use the direct import form:
+   ```bash
+   python -c "import asyncio; from workers.tasks.backup_tasks import run_backup; asyncio.run(run_backup({}))"
+   ```
 
-**Done when** a file matching `pg_dump_*.sql.gz`, `redis_dump_*.rdb.gz`, or `qdrant_snapshot_*.tar.gz` appears in the Drive folder within 5 minutes.
+**Done when** a file matching `cruz-pg-*.dump`, `cruz-redis-*.rdb`, or `cruz-qdrant-*.tar.gz` appears in the Drive folder within 5 minutes. (These are the actual filename patterns produced by `services/backup.py`; the old readiness-checklist patterns `pg_dump_*.sql.gz` etc. are wrong and should be corrected in `docs/production/readiness_checklist.md` as part of SP1.)
 
 ### Day 3 — Monitoring, perf, voice validation
 
@@ -141,8 +153,8 @@ Each gate criterion from charter Section 5.1 maps to a concrete check and an art
 |---|---|---|
 | 72h continuous uptime with `/health` green | `scripts/uptime/check_stability.py --summary` over 72h reports `pct_ok ≥ 99.0` (≤8 failed probes out of 864) | `logs/uptime/stability.jsonl` + summary appended to `docs/perf/load_results.md` |
 | Voice command from phone over cellular produces streamed response | Phone with WiFi off → open `https://cruz.simpleinc.cloud` → tap mic → speak → receive streamed SSE response | Short screen recording or screenshot series saved to `docs/perf/sp1-voice-cellular-test.md` (timestamp, phone model, response excerpt) |
-| One successful automated backup | ≥1 file matching `pg_dump_*.sql.gz`, `redis_dump_*.rdb.gz`, or `qdrant_snapshot_*.tar.gz` dated within 24h, visible in the Drive folder | Backup filename + timestamp in sign-off line |
-| Telegram alert fires on deliberately induced failure | `pm2 stop cruz-api`; Telegram DM arrives within 120s; `pm2 start cruz-api` | Screenshot of DM saved to `docs/perf/sp1-alert-test.md` |
+| One successful automated backup | ≥1 file matching `cruz-pg-*.dump`, `cruz-redis-*.rdb`, or `cruz-qdrant-*.tar.gz` dated within 24h, visible in the Drive folder | Backup filename + timestamp in sign-off line |
+| Telegram alert fires on deliberately induced failure | `pm2 stop cruz-api`; Telegram DM arrives within 120s; `pm2 start cruz-api` | Screenshot saved alongside `docs/perf/sp1-alert-test.md` as `docs/perf/sp1-alert-test.png` (markdown can't embed a screenshot natively; `.md` documents observed latency + links the sibling `.png`) |
 
 **All four must hold simultaneously within the same 7-day SP1 window** for the gate to pass.
 
@@ -175,10 +187,12 @@ Ordered by probability × impact.
 | 4 | Google Drive service account permissions wrong (folder shared Viewer instead of Editor; API disabled; JSON path wrong in `.env`) | Medium | Silent backup failure for weeks | Day 2 gate = one manual backup visible in Drive within 5 min; do not move to Day 3 until a file lands |
 | 5 | macOS sleeps during 72h probe (lid-close, idle sleep, App Nap suspends processes) | Medium | Probe drops below 99% pct_ok | Before Day 3 evening: `sudo pmset -a disablesleep 1` (or `caffeinate -d -i -s` wrapper); document revert command |
 | 6 | Load scenarios fail SLOs in prod config (regression hidden in dev) | Medium | Pushes Day 3 into Day 4; compresses probe window | Run scenarios before starting probe; failure → SP1 pauses at Day 3 and enters 25% fix window |
-| 7 | Phone-over-cellular blocked (ISP-level, CG-NAT edge cases, Cloudflare rate limit) | Low-medium | Can't prove voice gate | Validate Day 2 end (WiFi-off test) not Day 3; fallback: test via Tailscale mesh IP; if persistent, try alternate carrier SIM |
+| 7 | Phone-over-cellular blocked (ISP-level, CG-NAT edge cases, Cloudflare rate limit) | Low-medium | Can't prove voice gate | Validate Day 2 end (WiFi-off test) not Day 3; if persistent, try alternate carrier SIM. **Tailscale mesh IP is a diagnostic**, not a gate substitute: use it only to confirm CRUZ itself is responsive (isolating whether the problem is CRUZ or the public path). The charter gate explicitly requires public-cellular reach, which Tailscale does not prove. |
 | 8 | macOS permissions prompts stall startup (microphone, Accessibility, Full Disk Access for backups) | Low | Services half-start silently | First `./scripts/start-cruz.sh` run on Day 1 done interactively; grant every prompt as it appears; verify via `pm2 logs` that no process is stuck |
 | 9 | Real-DB integration tests fail (test DB doesn't exist, migration drift) | Low | Day 1 blocker | `createdb cruz_test -U cruz` + `alembic -c alembic.ini upgrade head` against `cruz_test` before `pytest tests/integration/` |
-| 10 | Telegram 90s alert window tight (Kuma default interval 60s + retry logic) | Low | Induced-outage test times out | Kuma API monitor at 30s interval; accept up to 120s observed in SP1 (charter exit gate uses 120s, not 90s) |
+| 10 | Telegram alert window tight (Kuma default interval 60s + retry logic) | Low | Induced-outage test times out | Kuma API monitor at 30s interval; SP1 budget = 120s (Kuma 30s interval + margin). Charter Section 5.1 is silent on window — 120s is an SP1 operational decision. The readiness-checklist notes 90s but that's the probe-trigger cadence, not the alert SLA. |
+| 11 | macOS permissions / `cloudflared service install` blocks on SIP or Gatekeeper prompts; `launchctl` may require Full Disk Access | Low-medium | Cloudflared service fails to install or start silently | On first `sudo cloudflared service install`, grant any prompts as they appear; if Gatekeeper blocks the binary, approve it in System Settings → Privacy & Security; verify service is running with `launchctl list \| grep cloudflared` before moving on |
+| 12 | Local port collisions — anything running on 3000/3001/3002/3100/6333 | Low | Stack half-starts with silent service failures that look like config bugs | Before Day 1 `./scripts/start-cruz.sh`: `lsof -i :3000 -i :3001 -i :3002 -i :3100 -i :6333`; kill any pre-existing listeners or fail fast with a clear port-conflict error |
 
 **Catch-all.** Any risk materialized not on this list that blocks a gate: invoke the charter's 25% fix-window rule (≤1.5 days).
 
@@ -228,7 +242,7 @@ Day 4-6: 72h probe runs ──► pct_ok ≥ 99 ──► Day 6 sign-off
 On SP1 close, SP2 inherits this state and must not re-verify:
 
 - All v1 services under PM2, auto-restart on reboot, registered with launchd
-- Qdrant container running via `docker compose`; collection `cruz_conversations` exists (pre-SP1)
+- Qdrant container running via `docker compose`; existing v1 collection `cruz_memories` (per `services/semantic_memory.py`) is created lazily on first agent write — SP2 must not assume it is pre-populated on a fresh SP1 Mac
 - Cloudflare tunnel live at `cruz.simpleinc.cloud`; external API reachable from any device
 - Telegram alerts functional; unhandled exceptions in CRUZ / ARQ worker / TITAN DM the phone
 - Daily backup to Google Drive at cron(hour=4); service-account credentials working

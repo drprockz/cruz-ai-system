@@ -29,7 +29,7 @@ v2 is seven independent sub-specs. Each ships on its own. Each has a spec → pl
 | **SP2** | Knowledge Base (Layer 1) | Multi-ring Qdrant (`cruz_activities`, `cruz_projects_docs`, `cruz_user_patterns`, `cruz_domain_knowledge`) + `projects` and `learned_patterns` tables + `context_builder` + `write_back`. Retrofit all 14 existing agents. | 1 week | SP1 |
 | **SP3** | Mac Controller (Layer 2) | `services/mac_controller.py` AppleScript primitives + Messenger agent + Calendar agent (native + Google dual). | 1 week | SP1 |
 | **SP4** | Browser Automation (Layer 3) | Playwright + persistent Chrome + anti-detect + LinkedIn + Job Hunter + WhatsApp agents. The dangerous one — selector maintenance burden starts here. | 2–3 weeks | SP2 |
-| **SP5** | Event Loop (Layer 4) | Webhook engine + ProactiveEngine + event-driven agent base class + Reply Triage, Meeting Prep, Followup, Funded Watcher, Invoice Enforcer, Health Guardian, Orchestrator (~7 agents; the rest become handlers per charter Rule 1). Intent Monitor provisionally cut — see Rule 6 of Section 4. | 2–3 weeks | SP2 |
+| **SP5** | Event Loop (Layer 4) | Webhook engine + ProactiveEngine + event-driven agent base class. **Agents (~8):** Reply Triage, Meeting Prep, Followup, Funded Watcher, Warm Network, Invoice Enforcer, Health Guardian, Orchestrator. **Handlers (~5, per Rule 1):** Expense Auditor, Portfolio Watcher, Tax Helper, Relationship Maintenance, Travel Planner — all are scheduled prompts + Claude call, no persistent state or tool loops. Intent Monitor cut entirely — see Section 4 → *Consequence — data-source constraint*. | 2–3 weeks | SP2 |
 | **SP6** | Screen Perception (Layer 5, scoped) | On-demand only. Mac screenshot + Claude Vision single-shot. Answer "what am I working on?" Active-app detection for context injection. No periodic capture, no Context Tracker agent. | 3–4 days | SP3 |
 | **SP7** | Multi-modal polish (Layer 6) | Voice daemon glue (wake → STT → /command → TTS, always-on) + menu bar app + PWA install polish + FCM push + React Native shell (or PWA-only if time-cut). | 1–2 weeks | SP1 |
 
@@ -84,7 +84,7 @@ async def handle(payload: dict, context: HandlerContext) -> HandlerResult: ...
 They can call `build_agent_context()` but cannot be invoked as CRUZ tools. They are scheduler- or webhook-triggered only.
 
 ### Rule 8 — Charter override
-Sub-specs can deviate from these rules but must (a) cite which rule, (b) state why the default doesn't fit, (c) propose the alternative in the sub-spec's design section, (d) get approval before implementing.
+Sub-specs can deviate from these rules but must (a) cite which rule, (b) state why the default doesn't fit, (c) propose the alternative in the sub-spec's design section under a labeled "Charter override" heading, (d) get explicit user approval (Darshan) before implementing. Charter overrides cannot be approved by Claude Code agents on their own authority.
 
 ---
 
@@ -150,6 +150,8 @@ Each sub-project must prove all of the following before the next one starts.
 
 A sub-project that fails its gate doesn't progress — it either gets a bounded fix window (≤25% of original estimate) or goes into a "v2.1 deferred" bucket. The next sub-project doesn't start until the gate passes or the failing SP is explicitly shelved.
 
+**Precedence with K2.** Fix-window time counts toward the 50% overrun calculation in K2. If SP4's 2–3-week estimate is still failing at the end of a fix window that would push total elapsed past week 4.5, K2 fires and forces a cut regardless of whether the gate is close to passing. This prevents "one more fix window" drift.
+
 ### 5.2 Composite kill criteria
 
 Can fire at any time, forcing action.
@@ -158,7 +160,7 @@ Can fire at any time, forcing action.
 
 **K2 — Time-overrun gate.** Any sub-project exceeding its estimate by >50% (e.g., SP4 budgeted 2–3 weeks crossing week 4) triggers **stop-and-reassess**. Outputs: (a) what's eating time, (b) cut scope, or (c) defer to v2.1. "Just push through" is explicitly forbidden. This rule is specifically for SP4 — historically where projects like this die.
 
-**K3 — Health gate.** Maintain a private weekly 1-line journal: sleep OK (Y/N) / commitments met (Y/N) / relationship calm (Y/N). Three "N"s in one week = **hard pause, 7 days, no Cruz work**. Two consecutive pause-weeks = charter reopens; reconsider whether to continue v2 at all.
+**K3 — Health gate.** Maintain a private daily 1-line journal entry: sleep OK (Y/N) / commitments met (Y/N) / relationship calm (Y/N). "Week" is a **rolling 7-day window** evaluated each Sunday evening. Three or more "N"s across any single-dimension in that 7-day window (e.g., 3 nights of poor sleep, or 3 days of missed commitments) = **hard pause, 7 days, no Cruz work**. Journal lives in `docs/personal/health-journal.md` (gitignored). Two consecutive pause-weeks = charter reopens; reconsider whether to continue v2 at all.
 
 ### 5.3 What "pause" means operationally
 
@@ -172,7 +174,7 @@ Pre-committed cut-list. If a gate fires (K1/K2/K3) and scope must shrink, cuts h
 
 | Order | What gets cut | Saves | Signal |
 |---|---|---|---|
-| 1 | **Intent Monitor** (already provisionally cut — ratified here) | 1 week | SP5 starting |
+| 1 | **Intent Monitor** (provisionally cut in Section 4 → *Consequence — data-source constraint*; ratified here) | 1 week | SP5 starting |
 | 2 | **Warm Network + Funded Watcher agents** | 4–5 days each | SP4 revenue gate (K1) fires |
 | 3 | **SP6 entirely** (Screen Perception) | 3–4 days | SP5 trending over estimate |
 | 4 | **SP7 React Native shell** (ship PWA-only) | 3–4 days | SP7 start |
@@ -182,8 +184,8 @@ Pre-committed cut-list. If a gate fires (K1/K2/K3) and scope must shrink, cuts h
 | 8 | **SP4 Job Hunter agent** (keep LinkedIn only) | 4–5 days | SP4 deep in selector-hell |
 | 9 | **SP3 Messenger agent** (use AppleScript primitives only, no agent) | 2–3 days | SP3 mid-build |
 | 10 | **SP3 Calendar native integration** (keep Google Calendar via existing API only) | 2–3 days | SP3 mid-build |
-| 11 | **SP3 entirely** (Mac Controller deferred to v2.1) | 1 week | Late-phase rescue |
-| 12 | **SP4 entirely** (Browser Automation deferred to v2.1) | 2–3 weeks | Emergency — reopen charter |
+| 11 | **SP3 entirely** (Mac Controller deferred to v2.1). Ripple: SP6 (Screen Perception) loses its Mac-primitive dependency and must defer too — already cut at #3, consistent. | 1 week | Late-phase rescue |
+| 12 | **SP4 entirely** (Browser Automation deferred to v2.1). Ripple: SP5 Reply Triage loses browser-sourced signals and must fall back to Gmail-only input. SP5 still ships but with reduced proactive surface. | 2–3 weeks | Emergency — reopen charter |
 
 **Uncuttable.** SP1 (operational deployment) and SP2 (knowledge base). SP1 is the foundation; SP2 makes the existing 14-agent v1 meaningfully better and is cheap.
 
@@ -203,7 +205,7 @@ v2 is "done" when **6 of 8** hold. Below 4 = v2 underdelivered; reopen charter.
 2. **Cross-device.** One conversation carried across phone + iPad + laptop in the same day with continuity preserved.
 3. **Knowledge-base quality.** Blind A/B on 10 real tasks (pre-KB vs post-KB output for Forge and Echo) — post-KB wins ≥7/10.
 4. **Browser automation safety.** 100+ LinkedIn DMs sent over 30 days with zero account warnings or restrictions.
-5. **Proactive value.** ≥3 actionable pings/day for 14 consecutive days. "Actionable" = action taken on it within 24h.
+5. **Proactive value.** ≥3 actionable pings/day for 14 consecutive days. "Actionable" = user took action on it within 24h. (Distinct from SP5's exit gate in Section 5.1, which measures classification accuracy and zero false-criticals on a 7-day window — that's the minimum bar to *ship* SP5; criterion 5 is the higher bar to call v2 a success.)
 6. **Revenue attribution.** ≥1 paid client attributable to v2 outreach within 6 weeks of SP4 completion.
 7. **Sales pipeline.** ≥3 sales calls booked via LinkedIn agent within 6 weeks of SP4 completion.
 8. **Screen perception (if SP6 shipped).** On-demand "what am I working on" correct on 9/10 ad-hoc tests.

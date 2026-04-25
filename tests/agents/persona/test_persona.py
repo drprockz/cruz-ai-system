@@ -24,6 +24,17 @@ def test_identity_loader_returns_name_cruz():
     assert "Warmth:" in snippet
 
 
+def test_identity_loader_credits_creator_darshan_drprockz():
+    """System prompt must pin the creator so the model doesn't hallucinate
+    that Anthropic/OpenAI built CRUZ when the user asks who made it."""
+    snippet = IdentityLoader.system_prompt_snippet()
+    assert "Darshan Parmar" in snippet
+    assert "drprockz" in snippet
+    # Explicit guard against the model crediting the wrong entity.
+    assert "Anthropic" in snippet  # …named only to instruct *not* to credit it
+    assert "who created you" in snippet or "created you" in snippet.lower()
+
+
 def test_identity_reload_bypasses_cache():
     d1 = IdentityLoader.load()
     d2 = IdentityLoader.reload()

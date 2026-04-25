@@ -62,34 +62,50 @@ export function ConversationTab() {
 
   return (
     <div className="h-full flex flex-col gap-4 p-4 overflow-hidden">
-      <Orb />
+      <div className="flex items-center justify-center pt-2">
+        <Orb />
+      </div>
 
-      <div className="flex-1 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900/50 p-4 text-sm">
-        {transcript.length === 0 && (
-          <div className="text-zinc-500">
-            Hold the button to talk, or type below.{" "}
-            <span className="text-zinc-600">
-              (On Mac you can also say &ldquo;Hey Jarvis&rdquo; via the
-              daemon.)
-            </span>
+      <div className="flex-1 overflow-y-auto rounded-xl border border-white/5 bg-black/30 backdrop-blur-sm p-4 text-sm space-y-3 [mask-image:linear-gradient(to_bottom,transparent,black_4%,black_96%,transparent)]">
+        {transcript.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center gap-3 py-12">
+            <div className="text-zinc-300 font-medium">
+              Type below, tap to talk, or press{" "}
+              <kbd className="px-1.5 py-0.5 rounded bg-white/10 border border-white/10 text-xs font-mono">
+                V
+              </kbd>{" "}
+              for voice mode.
+            </div>
+            <div className="text-zinc-500 text-xs max-w-sm">
+              CRUZ has context from your last 30 days of work and will
+              surface what matters. Try "what's on today?" or "summarize
+              yesterday's activity."
+            </div>
           </div>
+        ) : (
+          transcript.map((t, i) =>
+            t.role === "user" ? (
+              <div key={i} className="flex justify-start">
+                <div className="bg-white/5 text-zinc-100 rounded-2xl rounded-bl-sm px-4 py-2 max-w-[80%]">
+                  {t.text}
+                </div>
+              </div>
+            ) : t.role === "cruz" ? (
+              <div key={i} className="flex justify-end">
+                <div className="bg-cyan-500/10 text-cyan-100 border border-cyan-500/20 rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]">
+                  {t.text}
+                </div>
+              </div>
+            ) : (
+              <div
+                key={i}
+                className="text-[11px] text-zinc-500 text-center font-mono"
+              >
+                {t.text}
+              </div>
+            ),
+          )
         )}
-        {transcript.map((t, i) => (
-          <div key={i} className="mb-2">
-            <span
-              className={
-                t.role === "user"
-                  ? "text-blue-400 font-medium"
-                  : t.role === "cruz"
-                    ? "text-green-400 font-medium"
-                    : "text-zinc-500"
-              }
-            >
-              {t.role === "user" ? "You" : t.role === "cruz" ? "CRUZ" : "→"}
-            </span>
-            <span className="ml-2 text-zinc-200">{t.text}</span>
-          </div>
-        ))}
       </div>
 
       <div className="flex items-center gap-2">
@@ -104,13 +120,13 @@ export function ConversationTab() {
           }}
           disabled={sending}
           placeholder="Type a command or press Enter…"
-          className="flex-1 rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-green-500"
+          className="flex-1 rounded-xl bg-white/5 border border-white/10 px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-cyan-500/50 focus:bg-white/10 transition-colors"
         />
         <button
           type="button"
           onClick={() => void sendText()}
           disabled={sending || !input.trim()}
-          className="rounded-md bg-zinc-800 hover:bg-zinc-700 px-3 py-2 text-zinc-200 disabled:opacity-40"
+          className="rounded-xl bg-white/10 hover:bg-white/15 px-3 py-2.5 text-zinc-200 disabled:opacity-40 transition-colors"
           aria-label="Send"
         >
           <Send size={16} />

@@ -9,7 +9,18 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
+      // `selfDestroying: true` ships a service worker whose only job is to
+      // unregister ALL previously installed CRUZ service workers. This
+      // unblocks users who are stuck on stale JS cached by an older SW.
+      // Flip to `false` + keep registerType once the UI stabilises.
+      selfDestroying: true,
       registerType: "autoUpdate",
+      workbox: {
+        // If the SW is kept, new versions take over immediately — no more
+        // "30 min debugging stale cache" episodes.
+        skipWaiting: true,
+        clientsClaim: true,
+      },
       manifest: {
         name: "CRUZ",
         short_name: "CRUZ",

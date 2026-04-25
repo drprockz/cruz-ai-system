@@ -186,6 +186,25 @@ async def _speak_with_fallback(
     await source.capture_frame(frame)
 
 
+async def _publish_voice_msg(room: Any, msg: dict, *, reliable: bool = True) -> None:
+    """Publish a CruzVoiceMsg to all participants via LiveKit data channel.
+
+    Contract is defined in docs/superpowers/specs/2026-04-19-voice-mode-and-ui-polish.md
+    Schema:
+      {type: "stt_interim" | "stt_final", text: str}
+      {type: "reply_chunk", text: str, trace_id: str}
+      {type: "reply_done", trace_id: str}
+
+    Non-fatal on failure — voice still works without transcript UI.
+    """
+    import json as _json
+    try:
+        payload = _json.dumps(msg).encode("utf-8")
+        await room.local_participant.publish_data(payload, reliable=reliable)
+    except Exception:
+        logger.debug("voice data-channel publish failed (non-fatal)", exc_info=True)
+
+
 async def entrypoint(ctx: Any) -> None:
     """Called by the LiveKit agent harness for each new room."""
     from livekit import rtc  # type: ignore
@@ -361,19 +380,47 @@ async def entrypoint(ctx: Any) -> None:
     async def _process_turns() -> None:
         nonlocal turns, barges
         async for t in stt.transcripts():
-            if not t.is_final or not t.text.strip():
+            text_stripped = t.text.strip()
+            if not text_stripped:
                 continue
+            if not t.is_final:
+                # Stream interim transcripts to the UI — unreliable is fine,
+                # next interim supersedes the previous one anyway.
+                await _publish_voice_msg(
+                    room,
+                    {"type": "stt_interim", "text": text_stripped},
+                    reliable=False,
+                )
+                continue
+            # Final transcript: commit it to the UI, then run CRUZ.
+            await _publish_voice_msg(
+                room,
+                {"type": "stt_final", "text": text_stripped},
+                reliable=True,
+            )
             turns += 1
             await session_svc.increment_turn(session_id)
             tts_cancel.clear()
+            trace_id = str(uuid.uuid4())
             async for ev in cruz.stream_response(
-                task=t.text,
+                task=text_stripped,
                 conversation_id=conversation_id,
-                trace_id=str(uuid.uuid4()),
+                trace_id=trace_id,
                 device="mac_mini",
             ):
                 if isinstance(ev, (Text, ToolStart)):
                     text = ev.content if isinstance(ev, Text) else ev.summary
+                    # Push the text to the UI BEFORE we start TTS so the
+                    # transcript renders as fast as the audio plays.
+                    await _publish_voice_msg(
+                        room,
+                        {
+                            "type": "reply_chunk",
+                            "text": text,
+                            "trace_id": trace_id,
+                        },
+                        reliable=True,
+                    )
                     speaking["active"] = True
                     try:
                         await _speak_with_fallback(text, tts, audio_source, tts_cancel)
@@ -388,6 +435,11 @@ async def entrypoint(ctx: Any) -> None:
                         "turn done tokens=%d ms=%d",
                         ev.tokens_used,
                         ev.duration_ms,
+                    )
+                    await _publish_voice_msg(
+                        room,
+                        {"type": "reply_done", "trace_id": trace_id},
+                        reliable=True,
                     )
 
     try:
@@ -433,7 +485,14 @@ if __name__ == "__main__":
     # This guard prevents the ImportError from crashing the module on 3.9.
     try:
         from livekit.agents import WorkerOptions, cli  # type: ignore
-        cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+        # agent_name is REQUIRED for explicit dispatch on livekit-agents >=1.x.
+        # The /voice/token endpoint references this name via RoomConfiguration.
+        cli.run_app(
+            WorkerOptions(
+                agent_name="cruz-voice",
+                entrypoint_fnc=entrypoint,
+            )
+        )
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
             f"livekit-agents requires Python 3.10+. Got: {exc}"

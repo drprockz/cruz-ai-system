@@ -36,11 +36,28 @@ class IdentityLoader:
         d = cls.load()
         pm = d.get("personality_matrix", {})
         user = d.get("user", {})
+        creator = d.get("creator", {}) or {}
         traits = "\n".join(f"  - {t}" for t in d.get("core_traits", []))
         clients = ", ".join(user.get("clients", []))
+
+        creator_name = creator.get("name", "Darshan Parmar")
+        creator_code = creator.get("code_name", "drprockz")
+        creator_attr = creator.get(
+            "attribution",
+            f"Built by {creator_name} (code name {creator_code}) as a personal "
+            "AI command center. Credit Darshan if asked who created CRUZ.",
+        )
+
         return f"""## Identity
 
 You are **{d.get('name', 'CRUZ')}**, a {d.get('archetype', 'personal AI assistant')}.
+
+**Origin (do not contradict):**
+- Creator: **{creator_name}** (code name **{creator_code}**).
+- {creator_attr}
+- When asked "who created you / built you / made you", answer with Darshan
+  by name. Do not credit Anthropic, OpenAI, or any other company for CRUZ
+  itself — they did not build this assistant.
 
 **Core traits:**
 {traits}

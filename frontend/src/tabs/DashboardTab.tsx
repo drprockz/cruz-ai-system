@@ -1,9 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-
-// ─── API response types ───────────────────────────────────────────────────────
+import {
+  Calendar,
+  Mail,
+  GitPullRequest,
+  Rocket,
+  MessageSquareText,
+  Coins,
+  CircleDollarSign,
+  Clock3,
+  Activity,
+  AlarmClock,
+} from "lucide-react";
+import type { ReactNode } from "react";
 
 interface DashboardToday {
   calendar_events: unknown[];
@@ -44,20 +53,96 @@ interface DashboardResponse {
   upcoming: UpcomingItem[];
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Reusable card primitives ───────────────────────────────
 
-function HealthBadge({ state }: { state: ServiceState }) {
+function Card({ children }: { children: ReactNode }) {
   return (
-    <Badge
-      variant={state === "healthy" ? "default" : "destructive"}
-      className={state === "healthy" ? "bg-green-600 hover:bg-green-600" : undefined}
-    >
-      {state}
-    </Badge>
+    <div className="rounded-xl border border-white/5 bg-black/30 backdrop-blur-sm p-4 flex flex-col gap-3">
+      {children}
+    </div>
   );
 }
 
-// ─── DashboardTab ─────────────────────────────────────────────────────────────
+function CardTitle({ icon, title }: { icon: ReactNode; title: string }) {
+  return (
+    <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-zinc-400">
+      <span className="text-cyan-300/80">{icon}</span>
+      <span className="font-semibold">{title}</span>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  icon,
+}: {
+  label: string;
+  value: ReactNode;
+  icon: ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="w-8 h-8 rounded-lg bg-white/5 border border-white/5 flex items-center justify-center text-zinc-400">
+        {icon}
+      </div>
+      <div className="flex flex-col">
+        <span className="text-[11px] uppercase tracking-wide text-zinc-500">
+          {label}
+        </span>
+        <span className="text-lg font-semibold text-zinc-100 tabular-nums">
+          {value}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function HealthRow({ svc, state }: { svc: string; state: ServiceState }) {
+  const ok = state === "healthy";
+  return (
+    <div className="flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/5 transition-colors">
+      <span className="text-zinc-300 text-sm capitalize">
+        {svc.replace("_", " ")}
+      </span>
+      <span
+        className={
+          "inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full border " +
+          (ok
+            ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+            : "bg-rose-500/10 border-rose-500/30 text-rose-300")
+        }
+      >
+        <span
+          className={
+            "w-1.5 h-1.5 rounded-full " +
+            (ok ? "bg-emerald-400" : "bg-rose-400")
+          }
+        />
+        {state}
+      </span>
+    </div>
+  );
+}
+
+// ─── Skeleton ────────────────────────────────────────────────
+
+function DashboardSkeleton() {
+  return (
+    <div className="h-full overflow-y-auto p-4 grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div
+          key={i}
+          className="rounded-xl border border-white/5 bg-black/30 p-4 h-40 relative overflow-hidden"
+        >
+          <div className="absolute inset-0 animate-shimmer" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── DashboardTab ───────────────────────────────────────────
 
 export function DashboardTab() {
   const { data, isLoading } = useQuery<DashboardResponse>({
@@ -66,95 +151,96 @@ export function DashboardTab() {
     refetchInterval: 10_000,
   });
 
-  if (isLoading || !data) {
-    return <div className="p-6 text-zinc-500 text-sm">Loading dashboard…</div>;
-  }
+  if (isLoading || !data) return <DashboardSkeleton />;
 
   const { today, metrics, system_health, upcoming } = data;
 
   return (
     <div className="h-full overflow-y-auto p-4 grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
-      {/* Today */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Today</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <p className="text-zinc-500">Calendar events</p>
-            <p className="font-semibold">{today.calendar_events.length}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Unread emails</p>
-            <p className="font-semibold">{today.unread_emails}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Open PRs</p>
-            <p className="font-semibold">{today.open_prs}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Deploys today</p>
-            <p className="font-semibold">{today.deploys_today}</p>
-          </div>
-        </CardContent>
+        <CardTitle icon={<Calendar size={14} />} title="Today" />
+        <div className="grid grid-cols-2 gap-3">
+          <Stat
+            label="Calendar events"
+            value={today.calendar_events.length}
+            icon={<Calendar size={14} />}
+          />
+          <Stat
+            label="Unread emails"
+            value={today.unread_emails}
+            icon={<Mail size={14} />}
+          />
+          <Stat
+            label="Open PRs"
+            value={today.open_prs}
+            icon={<GitPullRequest size={14} />}
+          />
+          <Stat
+            label="Deploys today"
+            value={today.deploys_today}
+            icon={<Rocket size={14} />}
+          />
+        </div>
       </Card>
 
-      {/* Metrics */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Metrics</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <p className="text-zinc-500">Turns today</p>
-            <p className="font-semibold">{metrics.turns_today}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Tokens</p>
-            <p className="font-semibold">{metrics.tokens_today.toLocaleString()}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Est. cost</p>
-            <p className="font-semibold">${metrics.estimated_cost_usd.toFixed(2)}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Time saved</p>
-            <p className="font-semibold">{metrics.estimated_time_saved_hours}h</p>
-          </div>
-        </CardContent>
+        <CardTitle icon={<Activity size={14} />} title="Today's metrics" />
+        <div className="grid grid-cols-2 gap-3">
+          <Stat
+            label="Turns"
+            value={metrics.turns_today}
+            icon={<MessageSquareText size={14} />}
+          />
+          <Stat
+            label="Tokens"
+            value={metrics.tokens_today.toLocaleString()}
+            icon={<Coins size={14} />}
+          />
+          <Stat
+            label="Est. cost"
+            value={`$${metrics.estimated_cost_usd.toFixed(2)}`}
+            icon={<CircleDollarSign size={14} />}
+          />
+          <Stat
+            label="Time saved"
+            value={`${metrics.estimated_time_saved_hours}h`}
+            icon={<Clock3 size={14} />}
+          />
+        </div>
       </Card>
 
-      {/* System Health */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">System Health</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-2 text-sm">
-          {(Object.entries(system_health) as [string, ServiceState][]).map(([svc, state]) => (
-            <div key={svc} className="flex items-center justify-between">
-              <span className="text-zinc-400 capitalize">{svc.replace("_", " ")}</span>
-              <HealthBadge state={state} />
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      {/* Upcoming */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Upcoming</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {upcoming.length === 0 && (
-            <p className="text-zinc-500">No scheduled tasks.</p>
+        <CardTitle icon={<Activity size={14} />} title="System health" />
+        <div className="grid grid-cols-1 divide-y divide-white/5">
+          {(Object.entries(system_health) as [string, ServiceState][]).map(
+            ([svc, state]) => (
+              <HealthRow key={svc} svc={svc} state={state} />
+            ),
           )}
-          {upcoming.map((item) => (
-            <div key={item.agent} className="flex items-center justify-between">
-              <span className="text-zinc-300">{item.label}</span>
-              <span className="text-zinc-500 text-xs">{item.scheduled_at}</span>
-            </div>
-          ))}
-        </CardContent>
+        </div>
+      </Card>
+
+      <Card>
+        <CardTitle icon={<AlarmClock size={14} />} title="Upcoming" />
+        {upcoming.length === 0 ? (
+          <p className="text-zinc-500 text-sm py-4 text-center">
+            No scheduled tasks.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {upcoming.map((item) => (
+              <div
+                key={`${item.agent}-${item.scheduled_at}`}
+                className="flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/5 transition-colors"
+              >
+                <span className="text-zinc-300 text-sm">{item.label}</span>
+                <span className="text-zinc-500 text-xs tabular-nums">
+                  {item.scheduled_at}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
     </div>
   );

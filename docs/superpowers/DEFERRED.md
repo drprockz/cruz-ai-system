@@ -97,6 +97,31 @@ UPDATE projects SET local_path = '/Users/darshan/Projects/midar'          WHERE 
 
 ---
 
+## SP3 — Messenger / iMessage (deferred to v2.1)
+
+Pre-emptively cut from SP3 per charter §6 cut-list row 9 ("SP3 Messenger agent — use AppleScript primitives only, no agent"). Decision recorded in `docs/superpowers/specs/2026-04-26-sp3-mac-controller-design.md` Section 2 (Charter Override #2).
+
+### Why deferred
+
+- iMessage delivery via AppleScript (`tell application "Messages" to send`) has a silent-failure mode: AppleScript returns OK, message never delivers.
+- The only reliable verification is read-only access to `~/Library/Messages/chat.db`, which requires Full Disk Access (TCC permission) granted to the Python process or PM2's launchd plist.
+- The `chat.db` schema is undocumented and changes between macOS versions.
+- The 10/10 delivery exit-gate criterion is achievable but the engineering + ongoing maintenance cost is disproportionate to SP3's strategic role (which is to provide Mac primitives that unblock SP6, not to ship messaging).
+
+### What v2.1 must do if Messenger is reconsidered
+
+- [ ] Decide transport: iMessage via AppleScript + chat.db verification, OR an alternative (Telegram, SMS gateway) that doesn't need TCC
+- [ ] If sticking with iMessage: design Full Disk Access flow (one-time grant on Mac Mini; survives reboots; re-grant required on macOS major-version upgrade)
+- [ ] Recipient input shape: phone (E.164) / email / contact name (resolves via `tell application "Contacts"`)
+- [ ] Approval gate per Rule 4: default `send=False`, draft only; `send=True` proceeds
+- [ ] Live tier needs 10 verified test recipients (charter §5.1 SP3 original criterion); requires deciding what "test recipient" means (multiple personal Apple IDs, or family/colleague consenting recipients)
+
+### Re-evaluation trigger
+
+After SP7 ships, when Full Disk Access is already granted for one-time monitoring use cases (e.g., voice daemon log access). At that point the marginal cost of adding Messenger drops materially.
+
+---
+
 ## Tracking
 
 When you run the end-of-SP7 verification batch:

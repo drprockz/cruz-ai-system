@@ -31,6 +31,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all CATCH tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.catch.catch_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -836,3 +851,33 @@ class TestCatchSendMode:
             result = await CatchAgent().process(_make_input())
         assert result["requires_approval"] is True
         plane_cls.assert_not_called()
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestCatchKnowledgeBase:
+    async def test_catch_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        with patch("agents.catch.catch_agent.OllamaService") as ollama_cls, \
+             patch("agents.catch.catch_agent.VoicePipeline"), \
+             patch("agents.catch.catch_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(
+                return_value=_mock_ollama_response(_meeting_notes_json())
+            )
+            ollama_cls.return_value = mo
+            await CatchAgent().process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_catch_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert CatchAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_projects_docs",
+        ]

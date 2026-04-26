@@ -39,6 +39,7 @@ import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.knowledge_base import get_kb_service
 from services.ollama import OllamaService
 
 logger = logging.getLogger("cruz.agents.QT")
@@ -69,6 +70,8 @@ class QTAgent(BaseAgent):
     — running tests is non-destructive.
     """
 
+    KNOWLEDGE_RINGS: list[str] = ["cruz_activities", "cruz_projects_docs"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "QT"
@@ -77,46 +80,88 @@ class QTAgent(BaseAgent):
         start = time.monotonic()
         db = get_db_service()
         test_type = input["context"].get("test_type", "pytest")
+        output: Optional[AgentOutput] = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        # Most QT modes don't have an LLM call to inject context into;
+        # the read still warms past-test telemetry, and the write below
+        # records every QT run regardless of mode.
+        kb = get_kb_service()
+        await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
         try:
-            if test_type == "pytest":
-                result, success = await self._run_pytest(input["context"])
-            elif test_type == "npm_audit":
-                result, success = await self._run_npm_audit(input["context"])
-            elif test_type == "playwright":
-                result, success = await self._run_playwright(input["context"])
-            elif test_type == "lighthouse":
-                result, success = await self._run_lighthouse(input["context"])
-            elif test_type == "generate":
-                result, success, tokens = await self._generate_tests(input)
-                duration = int((time.monotonic() - start) * 1000)
-                try:
-                    await self.log(
-                        db=db,
-                        trace_id=input["trace_id"],
-                        status="success",
-                        input_data={"task": input["task"], "test_type": test_type},
-                        output_data={"generated": bool(result.get("generated"))},
-                        tokens_used=tokens,
+            try:
+                if test_type == "pytest":
+                    result, success = await self._run_pytest(input["context"])
+                elif test_type == "npm_audit":
+                    result, success = await self._run_npm_audit(input["context"])
+                elif test_type == "playwright":
+                    result, success = await self._run_playwright(input["context"])
+                elif test_type == "lighthouse":
+                    result, success = await self._run_lighthouse(input["context"])
+                elif test_type == "generate":
+                    result, success, tokens = await self._generate_tests(input)
+                    duration = int((time.monotonic() - start) * 1000)
+                    try:
+                        await self.log(
+                            db=db,
+                            trace_id=input["trace_id"],
+                            status="success",
+                            input_data={"task": input["task"], "test_type": test_type},
+                            output_data={"generated": bool(result.get("generated"))},
+                            tokens_used=tokens,
+                            duration_ms=duration,
+                        )
+                    except Exception:
+                        pass
+                    output = AgentOutput(
+                        success=success,
+                        result=result,
+                        agent=self.name,
                         duration_ms=duration,
+                        tokens_used=tokens,
+                        error=None,
+                        requires_approval=False,
+                        approval_prompt=None,
                     )
-                except Exception:
-                    pass
-                return AgentOutput(
-                    success=success,
-                    result=result,
-                    agent=self.name,
-                    duration_ms=duration,
-                    tokens_used=tokens,
-                    error=None,
-                    requires_approval=False,
-                    approval_prompt=None,
-                )
-            else:
-                err = (
-                    f"Unknown test_type '{test_type}'. "
-                    f"Supported: pytest, npm_audit, playwright, lighthouse, generate."
-                )
+                    return output
+                else:
+                    err = (
+                        f"Unknown test_type '{test_type}'. "
+                        f"Supported: pytest, npm_audit, playwright, lighthouse, generate."
+                    )
+                    try:
+                        await self.log(
+                            db=db,
+                            trace_id=input["trace_id"],
+                            status="error",
+                            input_data={"task": input["task"], "test_type": test_type},
+                            output_data={"error": err},
+                            tokens_used=0,
+                            duration_ms=int((time.monotonic() - start) * 1000),
+                        )
+                    except Exception:
+                        pass
+                    output = AgentOutput(
+                        success=False,
+                        result=None,
+                        agent=self.name,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        tokens_used=0,
+                        error=err,
+                        requires_approval=False,
+                        approval_prompt=None,
+                    )
+                    return output
+
+            except Exception as exc:
+                err = str(exc)
+                duration = int((time.monotonic() - start) * 1000)
                 try:
                     await self.log(
                         db=db,
@@ -125,71 +170,63 @@ class QTAgent(BaseAgent):
                         input_data={"task": input["task"], "test_type": test_type},
                         output_data={"error": err},
                         tokens_used=0,
-                        duration_ms=int((time.monotonic() - start) * 1000),
+                        duration_ms=duration,
                     )
                 except Exception:
                     pass
-                return AgentOutput(
+                output = AgentOutput(
                     success=False,
                     result=None,
                     agent=self.name,
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    duration_ms=duration,
                     tokens_used=0,
                     error=err,
                     requires_approval=False,
                     approval_prompt=None,
                 )
+                return output
 
-        except Exception as exc:
-            err = str(exc)
             duration = int((time.monotonic() - start) * 1000)
             try:
                 await self.log(
                     db=db,
                     trace_id=input["trace_id"],
-                    status="error",
+                    status="success",
                     input_data={"task": input["task"], "test_type": test_type},
-                    output_data={"error": err},
+                    output_data=result,
                     tokens_used=0,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
-            return AgentOutput(
-                success=False,
-                result=None,
+
+            output = AgentOutput(
+                success=success,
+                result=result,
                 agent=self.name,
                 duration_ms=duration,
                 tokens_used=0,
-                error=err,
+                error=None,
                 requires_approval=False,
                 approval_prompt=None,
             )
+            return output
 
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"task": input["task"], "test_type": test_type},
-                output_data=result,
-                tokens_used=0,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=success,
-            result=result,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=0,
-            error=None,
-            requires_approval=False,
-            approval_prompt=None,
-        )
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "qt",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     # ── Runners ──────────────────────────────────────────────────────────────
 

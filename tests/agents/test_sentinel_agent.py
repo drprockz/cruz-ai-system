@@ -44,6 +44,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all SENTINEL tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.sentinel.sentinel_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -644,3 +659,28 @@ class TestSentinelSendMode:
         kwargs = gh_svc.post_pr_review.call_args.kwargs
         assert kwargs["comments"] == []
         assert len(kwargs["body"]) > 0
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+class TestSentinelKnowledgeBase:
+    async def test_sentinel_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        with patch("agents.sentinel.sentinel_agent.httpx.AsyncClient") as mc, \
+             patch("agents.sentinel.sentinel_agent.anthropic.AsyncAnthropic") as ma, \
+             patch("agents.sentinel.sentinel_agent.get_db_service"):
+            _setup_github_mock(mc)
+            _setup_claude_mock(ma, _clean_review())
+            await SentinelAgent().process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_sentinel_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        from agents.sentinel.sentinel_agent import SentinelAgent
+        assert SentinelAgent.KNOWLEDGE_RINGS == ["cruz_activities", "cruz_projects_docs"]

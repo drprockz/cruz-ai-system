@@ -75,6 +75,7 @@ def upgrade() -> None:
     )
 
     # ── seed projects ─────────────────────────────────────────────────
+    # ON CONFLICT makes upgrade safely re-runnable on non-empty DB.
     op.execute("""
         INSERT INTO projects (id, name, slug, type, status) VALUES
             (gen_random_uuid()::text, 'AMA Solutions',  'ama-solutions',  'client',   'active'),
@@ -82,6 +83,7 @@ def upgrade() -> None:
             (gen_random_uuid()::text, 'SuiteAdvisors',  'suiteadvisors',  'client',   'active'),
             (gen_random_uuid()::text, 'Asia Capital',   'asia-capital',   'client',   'active'),
             (gen_random_uuid()::text, 'MIDAR',          'midar',          'personal', 'active')
+        ON CONFLICT (slug) DO NOTHING
     """)
 
 

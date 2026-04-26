@@ -298,7 +298,7 @@ class KnowledgeBaseService:
                 """,
                 row_id, interaction_type, observed_pattern[:200], agent_name,
             )
-            row = await self._db.fetch_one(
+            row = await self._db.fetchrow(
                 """
                 SELECT observation_count FROM learned_patterns
                 WHERE pattern_type = $1 AND content = $2 AND source = 'inferred'

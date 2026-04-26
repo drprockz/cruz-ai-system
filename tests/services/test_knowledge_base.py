@@ -30,8 +30,8 @@ def _make_embedding():
 
 def _make_db():
     db = AsyncMock()
-    db.fetch_one = AsyncMock(return_value=None)
-    db.fetch_all = AsyncMock(return_value=[])
+    db.fetchrow = AsyncMock(return_value=None)
+    db.fetch = AsyncMock(return_value=[])
     db.execute = AsyncMock()
     return db
 
@@ -271,8 +271,8 @@ class TestWriteUserPattern:
 class TestObserveInteraction:
     def _make_kb(self, observation_count_after=1):
         db = _make_db()
-        # fetch_one returns the current count after upsert
-        db.fetch_one = AsyncMock(return_value={"observation_count": observation_count_after})
+        # fetchrow returns the current count after upsert
+        db.fetchrow = AsyncMock(return_value={"observation_count": observation_count_after})
         return KnowledgeBaseService(_make_qdrant(), _make_embedding(), db)
 
     @pytest.mark.asyncio

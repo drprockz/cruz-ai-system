@@ -35,6 +35,7 @@ import anthropic
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.embedding import get_embedding_service
+from services.knowledge_base import get_kb_service
 from services.ollama import OllamaService
 from services.qdrant import get_qdrant_service
 from services.semantic_memory import SemanticMemoryService
@@ -68,6 +69,8 @@ class RawAgent(BaseAgent):
     requires_approval=False — internal read-only work.
     """
 
+    KNOWLEDGE_RINGS: List[str] = ["cruz_activities", "cruz_domain_knowledge"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "RAW"
@@ -77,15 +80,29 @@ class RawAgent(BaseAgent):
         db = get_db_service()
         mode = input["context"].get("mode", "research")
         topic = input["context"].get("topic", "") or input["task"]
+        output: AgentOutput | None = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
         try:
             if mode == "dependencies":
-                summary, items, tokens_used = await self._scan_dependencies(input["trace_id"])
+                summary, items, tokens_used = await self._scan_dependencies(
+                    input["trace_id"], kb_context=kb_context
+                )
                 topic = "pip-dependencies"
             else:
                 # Default: research mode
                 mode = "research"
-                summary, tokens_used = await self._research(topic, input["trace_id"])
+                summary, tokens_used = await self._research(
+                    topic, input["trace_id"], kb_context=kb_context
+                )
                 items = []
 
             # Store finding in Qdrant semantic memory
@@ -110,6 +127,32 @@ class RawAgent(BaseAgent):
                 "items": items,
             }
 
+            # ── Write domain knowledge to cruz_domain_knowledge ring ─────
+            # RAW is the canonical producer of long-lived research findings.
+            # We write the summary as one entry, plus each parsed item
+            # (e.g. outdated package) as its own entry so each gets a
+            # distinct embedding/topic.
+            try:
+                await kb.write_domain_knowledge(
+                    content=str(summary)[:1000],
+                    topic=topic,
+                    source="raw_agent",
+                    trace_id=input["trace_id"],
+                )
+                for item in items:
+                    await kb.write_domain_knowledge(
+                        content=f"{topic}: {item}",
+                        topic=f"{topic}:{item}",
+                        source="raw_agent",
+                        trace_id=input["trace_id"],
+                    )
+            except Exception as kb_exc:
+                logger.warning(
+                    "[%s] write_domain_knowledge failed (non-fatal): %s",
+                    input["trace_id"],
+                    kb_exc,
+                )
+
             duration = int((time.monotonic() - start) * 1000)
             try:
                 await self.log(
@@ -124,7 +167,7 @@ class RawAgent(BaseAgent):
             except Exception:
                 pass
 
-            return AgentOutput(
+            output = AgentOutput(
                 success=True,
                 result=result,
                 agent=self.name,
@@ -134,6 +177,7 @@ class RawAgent(BaseAgent):
                 requires_approval=False,
                 approval_prompt=None,
             )
+            return output
 
         except Exception as exc:
             err = str(exc)
@@ -150,7 +194,7 @@ class RawAgent(BaseAgent):
                 )
             except Exception:
                 pass
-            return AgentOutput(
+            output = AgentOutput(
                 success=False,
                 result=None,
                 agent=self.name,
@@ -160,21 +204,46 @@ class RawAgent(BaseAgent):
                 requires_approval=False,
                 approval_prompt=None,
             )
+            return output
+
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "raw",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     # ── Research mode ─────────────────────────────────────────────────────
 
-    async def _research(self, topic: str, trace_id: str) -> Tuple[str, int]:
+    async def _research(
+        self, topic: str, trace_id: str, kb_context: str = ""
+    ) -> Tuple[str, int]:
         """Summarise a tech topic using Llama, fall back to Claude Haiku."""
         prompt = f"{_RESEARCH_SYSTEM}\n\nTopic: {topic}"
+        if kb_context:
+            prompt = kb_context + "\n\n" + prompt
         return await self._generate(prompt, trace_id)
 
     # ── Dependencies mode ─────────────────────────────────────────────────
 
-    async def _scan_dependencies(self, trace_id: str) -> Tuple[str, List[str], int]:
+    async def _scan_dependencies(
+        self, trace_id: str, kb_context: str = ""
+    ) -> Tuple[str, List[str], int]:
         """Run pip list --outdated, analyse with Llama, return summary + items."""
         pip_output = await self._run_pip_outdated()
         items = _parse_outdated_packages(pip_output)
         prompt = f"{_DEPS_SYSTEM}\n\npip list --outdated output:\n{pip_output or '(no outdated packages)'}"
+        if kb_context:
+            prompt = kb_context + "\n\n" + prompt
         summary, tokens_used = await self._generate(prompt, trace_id)
         return summary, items, tokens_used
 

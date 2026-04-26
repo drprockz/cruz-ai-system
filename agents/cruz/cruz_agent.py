@@ -43,6 +43,7 @@ from services.alerts import get_alert_service
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
+from services.knowledge_base import get_kb_service
 from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
@@ -283,6 +284,26 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["task"],
         },
     },
+    {
+        "name": "record_pattern_observation",
+        "description": (
+            "Call this when the user's message is a behavioral correction — "
+            "e.g. 'no, use formal tone', 'always use snake_case', "
+            "'stop adding comments'. Records the observation toward learning "
+            "Darshan's preferences. agent_name is the agent whose output was corrected."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name":        {"type": "string"},
+                "interaction_type":  {"type": "string",
+                                      "description": "e.g. email_draft_edited, code_edited"},
+                "observed_pattern":  {"type": "string",
+                                      "description": "The preference rule observed"},
+            },
+            "required": ["agent_name", "interaction_type", "observed_pattern"],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -310,6 +331,8 @@ class CruzAgent(BaseAgent):
     specialist agents, and returns the final response to the caller.
     """
 
+    KNOWLEDGE_RINGS: List[str] = ["cruz_activities", "cruz_user_patterns"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "CRUZ"
@@ -317,6 +340,16 @@ class CruzAgent(BaseAgent):
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
         total_tokens = 0
+        output: Optional[AgentOutput] = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
         try:
             # LLM routing happens via services.llm — backend chosen by
@@ -410,6 +443,8 @@ class CruzAgent(BaseAgent):
                 f"Never say you 'can't access real-time data' — this runtime context IS real-time."
             )
             system_prompt = _SYSTEM_PROMPT + runtime_context
+            if kb_context:
+                system_prompt = kb_context + "\n\n" + system_prompt
             max_reply_tokens = 8096
             if device in ("mac_mini", "phone", "ipad"):
                 system_prompt = system_prompt + (
@@ -502,7 +537,7 @@ class CruzAgent(BaseAgent):
                         tokens_used=total_tokens,
                         duration_ms=duration,
                     )
-                    return AgentOutput(
+                    output = AgentOutput(
                         success=True,
                         result=text,
                         agent=self.name,
@@ -512,6 +547,7 @@ class CruzAgent(BaseAgent):
                         requires_approval=False,
                         approval_prompt=None,
                     )
+                    return output
 
                 # --------------------------------------------------------
                 # Tool use — dispatch and collect results
@@ -522,6 +558,23 @@ class CruzAgent(BaseAgent):
 
                     for block in response.content:
                         if block.type != "tool_use":
+                            continue
+
+                        # ── Built-in tool: record pattern observation ────
+                        if block.name == "record_pattern_observation":
+                            tool_input = block.input or {}
+                            await kb.observe_interaction(
+                                tool_input.get("agent_name", "unknown"),
+                                tool_input.get("interaction_type", "unknown"),
+                                tool_input.get("observed_pattern", ""),
+                            )
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": str({"recorded": True}),
+                                }
+                            )
                             continue
 
                         agent_output = await self._dispatch_tool(
@@ -546,7 +599,7 @@ class CruzAgent(BaseAgent):
                         )
 
                     if approval_gate is not None:
-                        return AgentOutput(
+                        output = AgentOutput(
                             success=True,
                             result=approval_gate.get("result"),
                             agent=self.name,
@@ -556,6 +609,7 @@ class CruzAgent(BaseAgent):
                             requires_approval=True,
                             approval_prompt=approval_gate.get("approval_prompt"),
                         )
+                        return output
 
                     # Feed tool results back to Claude for the final response
                     messages.append({"role": "assistant", "content": response.content})
@@ -564,7 +618,7 @@ class CruzAgent(BaseAgent):
 
                 # Unexpected stop_reason — treat as end of loop
                 text = _extract_text(response.content)
-                return AgentOutput(
+                output = AgentOutput(
                     success=True,
                     result=text or "",
                     agent=self.name,
@@ -574,6 +628,7 @@ class CruzAgent(BaseAgent):
                     requires_approval=False,
                     approval_prompt=None,
                 )
+                return output
 
         except Exception as exc:
             output = self.handle_error(exc, input["trace_id"])
@@ -598,6 +653,22 @@ class CruzAgent(BaseAgent):
             except Exception:
                 pass  # log() already swallows, but guard against db init failure
             return output
+
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "cruz",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     async def _dispatch_tool(
         self,

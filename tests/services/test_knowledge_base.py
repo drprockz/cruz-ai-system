@@ -243,3 +243,56 @@ class TestWriteDomainKnowledge:
         await kb.write_domain_knowledge("note", "topic", source="manual")
         payload = kb._qdrant.upsert.call_args.kwargs["payload"]
         assert payload["source"] == "manual"
+
+
+class TestWriteUserPattern:
+    @pytest.fixture
+    def kb(self):
+        return KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+
+    @pytest.mark.asyncio
+    async def test_writes_to_user_patterns_collection(self, kb):
+        await kb.write_user_pattern("prefer snake_case", "code_style")
+        kb._qdrant.ensure_collection.assert_awaited_with(
+            "cruz_user_patterns", 384
+        )
+        payload = kb._qdrant.upsert.call_args.kwargs["payload"]
+        assert payload["content"] == "prefer snake_case"
+        assert payload["pattern_type"] == "code_style"
+        assert payload["source"] == "explicit"
+        assert payload["confidence"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_also_inserts_into_learned_patterns_db(self, kb):
+        await kb.write_user_pattern("formal tone", "comm_style")
+        kb._db.execute.assert_awaited()
+
+
+class TestObserveInteraction:
+    def _make_kb(self, observation_count_after=1):
+        db = _make_db()
+        # fetch_one returns the current count after upsert
+        db.fetch_one = AsyncMock(return_value={"observation_count": observation_count_after})
+        return KnowledgeBaseService(_make_qdrant(), _make_embedding(), db)
+
+    @pytest.mark.asyncio
+    async def test_increments_count_below_threshold(self):
+        kb = self._make_kb(observation_count_after=3)
+        await kb.observe_interaction("echo", "email_edited", "shortened body")
+        kb._db.execute.assert_awaited()  # counter row must be upserted
+        # No pattern written yet — count < threshold
+        kb._qdrant.upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_writes_pattern_at_threshold(self):
+        kb = self._make_kb(observation_count_after=5)
+        with patch("services.knowledge_base.asyncio") as mock_asyncio:
+            mock_asyncio.create_task = MagicMock()
+            await kb.observe_interaction("echo", "email_edited", "shortened body")
+            mock_asyncio.create_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_raise_on_db_error(self):
+        kb = KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+        kb._db.execute = AsyncMock(side_effect=Exception("db down"))
+        await kb.observe_interaction("forge", "code_edited", "added type hints")

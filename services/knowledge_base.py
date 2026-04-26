@@ -229,7 +229,46 @@ class KnowledgeBaseService:
         agent_name: Optional[str] = None,
     ) -> None:
         """Write a pattern immediately. Bypasses the observation threshold."""
-        raise NotImplementedError
+        try:
+            vector = self._embedding.encode(content)
+            point_id = self._point_id(pattern_type, content[:80])
+            payload: Dict[str, Any] = {
+                "pattern_type":      pattern_type,
+                "content":           content,
+                "source":            source,
+                "agent_name":        agent_name,
+                "observation_count": 1,
+                "confidence":        1.0 if source == "explicit" else 0.8,
+                "timestamp":         time.time(),
+            }
+            await self._qdrant.ensure_collection(
+                self.COLLECTION_USER_PATTERNS, self.VECTOR_SIZE
+            )
+            await self._qdrant.upsert(
+                collection=self.COLLECTION_USER_PATTERNS,
+                id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+            row_id = str(uuid.uuid4())
+            await self._db.execute(
+                """
+                INSERT INTO learned_patterns
+                    (id, pattern_type, content, source, agent_name,
+                     observation_count, confidence, qdrant_id, active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE)
+                ON CONFLICT (pattern_type, content, source)
+                DO UPDATE SET
+                    confidence  = EXCLUDED.confidence,
+                    qdrant_id   = EXCLUDED.qdrant_id,
+                    active      = TRUE,
+                    updated_at  = NOW()
+                """,
+                row_id, pattern_type, content, source, agent_name,
+                1, 1.0 if source == "explicit" else 0.8, point_id,
+            )
+        except Exception as exc:
+            logger.warning("write_user_pattern failed (non-fatal): %s", exc)
 
     # ── WRITE — user patterns (inferred) ─────────────────────────────
 
@@ -243,7 +282,73 @@ class KnowledgeBaseService:
         Increment observation count. At threshold=5, extract and write pattern
         as a background asyncio task (non-blocking, falls back on API error).
         """
-        raise NotImplementedError
+        try:
+            row_id = str(uuid.uuid4())
+            # Upsert a counter row keyed on (pattern_type, content, source)
+            await self._db.execute(
+                """
+                INSERT INTO learned_patterns
+                    (id, pattern_type, content, source, agent_name, observation_count,
+                     confidence, active)
+                VALUES ($1, $2, $3, 'inferred', $4, 1, 0.0, FALSE)
+                ON CONFLICT (pattern_type, content, source)
+                DO UPDATE SET
+                    observation_count = learned_patterns.observation_count + 1,
+                    updated_at = NOW()
+                """,
+                row_id, interaction_type, observed_pattern[:200], agent_name,
+            )
+            row = await self._db.fetch_one(
+                """
+                SELECT observation_count FROM learned_patterns
+                WHERE pattern_type = $1 AND content = $2 AND source = 'inferred'
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                interaction_type, observed_pattern[:200],
+            )
+            if row and row["observation_count"] >= self.PATTERN_THRESHOLD:
+                asyncio.create_task(
+                    self._extract_and_write_pattern(agent_name, interaction_type, observed_pattern)
+                )
+        except Exception as exc:
+            logger.warning("observe_interaction failed (non-fatal): %s", exc)
+
+    async def _extract_and_write_pattern(
+        self,
+        agent_name: str,
+        interaction_type: str,
+        observed_pattern: str,
+    ) -> None:
+        """Background task: call Claude Sonnet to clean the pattern, then write it."""
+        try:
+            from services.llm import chat as llm_chat
+            messages = [{
+                "role": "user",
+                "content": (
+                    f"An agent named {agent_name} has repeatedly observed this pattern "
+                    f"in user interactions (type: {interaction_type}):\n\n"
+                    f"{observed_pattern}\n\n"
+                    "Write a single concise preference rule in plain English "
+                    "(one sentence, starts with 'Darshan prefers' or 'Darshan always'). "
+                    "Output only the rule — no explanation, no quotes."
+                ),
+            }]
+            result = await llm_chat(
+                model="claude-sonnet-4-6",
+                messages=messages,
+                system="You extract user preference rules from behavioral observations.",
+                max_tokens=100,
+            )
+            cleaned = result.strip()
+            if cleaned:
+                await self.write_user_pattern(
+                    cleaned,
+                    pattern_type=interaction_type,
+                    source="inferred",
+                    agent_name=agent_name,
+                )
+        except Exception as exc:
+            logger.warning("_extract_and_write_pattern failed (non-fatal): %s", exc)
 
     # ── WRITE — domain knowledge ──────────────────────────────────────
 

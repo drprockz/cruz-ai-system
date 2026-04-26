@@ -39,8 +39,25 @@ the repo root.
   ```
 
 - [ ] **Real-DB integration tests green**
+
+  Setup (one-time per fresh DB):
   ```bash
-  DATABASE_URL_TEST=postgresql+asyncpg://cruz:cruz@localhost:5432/cruz_test \
+  # Create cruz_test as the OS user (Homebrew Postgres makes the OS user a superuser)
+  createdb cruz_test
+  # Transfer ownership to the cruz role used by the app + tests
+  psql -d cruz_test -c "ALTER DATABASE cruz_test OWNER TO cruz; ALTER SCHEMA public OWNER TO cruz;"
+  # Apply migrations
+  DATABASE_URL=postgresql+asyncpg://cruz:cruz@localhost:5432/cruz_test \
+    alembic -c alembic.ini upgrade head
+  ```
+
+  Run the suite (note: plain `postgresql://` DSN — `tests/integration/test_real_db.py`
+  uses `asyncpg.connect()` directly which can't parse the SQLAlchemy `+asyncpg`
+  driver suffix; the test fixture also shells out to `alembic` so the venv must
+  be activated):
+  ```bash
+  source venv/bin/activate
+  DATABASE_URL_TEST=postgresql://cruz:cruz@localhost:5432/cruz_test \
     pytest tests/integration/ -v
   ```
 
@@ -59,12 +76,20 @@ the repo root.
 
 ## Data protection
 
-- [ ] **Latest backup visible in Google Drive** — at least one of
-      `pg_dump_*.sql.gz`, `redis_dump_*.rdb.gz`, `qdrant_snapshot_*.tar.gz`
-      dated within the last 24h.
+- [ ] **Latest backup visible at the configured target** — at least one of
+      `cruz-pg-*.dump`, `cruz-redis-*.rdb`, or `cruz-qdrant-*.tar.gz`
+      (filenames produced by `services/backup.py:57,76,105`) dated within
+      the last 24h.
+
+  The backup writes to Google Drive by default. When `BACKUP_LOCAL_DIR` is
+  set in `.env` (e.g., during SP1 before a Workspace Shared Drive is set up
+  — service accounts have no personal Drive quota), backups are moved to
+  that directory instead.
   ```bash
-  # If gdrive CLI configured:
-  gdrive list --query "name contains 'cruz_backup'" | head
+  # Local target (when BACKUP_LOCAL_DIR is set):
+  ls -lh "${BACKUP_LOCAL_DIR}" | head
+  # Google Drive target (when BACKUP_LOCAL_DIR is unset and gdrive CLI configured):
+  gdrive list --query "name contains 'cruz-'" | head
   ```
 
 ## Monitoring

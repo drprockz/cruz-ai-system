@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# Production build config for the frontend SPA — declares VITE_API_BASE etc.
+# Safe to track (no secrets); needed so prod builds use relative API URLs.
+!frontend/.env.production
 *.pem
 *.key
 credentials.json

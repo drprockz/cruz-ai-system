@@ -35,6 +35,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all PM tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.pm.pm_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -667,3 +682,30 @@ class TestPMSendMode:
             result = await PMAgent().process(_make_input())
         assert result["requires_approval"] is True
         plane_cls.assert_not_called()
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestPMKnowledgeBase:
+    async def test_pm_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        with patch("agents.pm.pm_agent.OllamaService") as ollama_cls, \
+             patch("agents.pm.pm_agent.get_db_service"):
+            mo = AsyncMock()
+            mo.generate = AsyncMock(return_value=_mock_ollama_response(_sprint_plan_json()))
+            ollama_cls.return_value = mo
+            await PMAgent().process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_pm_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert PMAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_projects_docs",
+        ]

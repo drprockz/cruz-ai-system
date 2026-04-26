@@ -20,6 +20,7 @@ from services.llm import chat as llm_chat
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.knowledge_base import get_kb_service
 
 _MODEL = "claude-sonnet-4-6"
 _SYSTEM_PROMPT = (
@@ -37,6 +38,8 @@ class GeneralAgent(BaseAgent):
     can accumulate cost across the full request pipeline.
     """
 
+    KNOWLEDGE_RINGS: list[str] = ["cruz_activities"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "GENERAL"
@@ -44,58 +47,89 @@ class GeneralAgent(BaseAgent):
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
         db = get_db_service()
+        output: AgentOutput | None = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
+        system = _SYSTEM_PROMPT
+        if kb_context:
+            system = kb_context + "\n\n" + system
 
         try:
-            messages: List[Dict[str, str]] = [
-                {"role": "user", "content": input["task"]}
-            ]
-
-            response = await llm_chat(
-                system=_SYSTEM_PROMPT,
-                messages=messages,
-                max_tokens=4096,
-            )
-
-            result_text: str = response.content[0].text
-            tokens_used: int = response.usage.input_tokens + response.usage.output_tokens
-            duration_ms = int((time.monotonic() - start) * 1000)
-
             try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="success",
-                    input_data={"task": input["task"]},
-                    output_data={"result": result_text},
-                    tokens_used=tokens_used,
+                messages: List[Dict[str, str]] = [
+                    {"role": "user", "content": input["task"]}
+                ]
+
+                response = await llm_chat(
+                    system=system,
+                    messages=messages,
+                    max_tokens=4096,
+                )
+
+                result_text: str = response.content[0].text
+                tokens_used: int = response.usage.input_tokens + response.usage.output_tokens
+                duration_ms = int((time.monotonic() - start) * 1000)
+
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="success",
+                        input_data={"task": input["task"]},
+                        output_data={"result": result_text},
+                        tokens_used=tokens_used,
+                        duration_ms=duration_ms,
+                    )
+                except Exception:
+                    pass
+
+                output = AgentOutput(
+                    success=True,
+                    result=result_text,
+                    agent=self.name,
                     duration_ms=duration_ms,
+                    tokens_used=tokens_used,
+                    error=None,
+                    requires_approval=False,
+                    approval_prompt=None,
                 )
-            except Exception:
-                pass
+                return output
 
-            return AgentOutput(
-                success=True,
-                result=result_text,
-                agent=self.name,
-                duration_ms=duration_ms,
-                tokens_used=tokens_used,
-                error=None,
-                requires_approval=False,
-                approval_prompt=None,
-            )
+            except Exception as exc:
+                output = self.handle_error(exc, input["trace_id"])
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"task": input["task"]},
+                        output_data={"error": str(exc)},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                return output
 
-        except Exception as exc:
-            output = self.handle_error(exc, input["trace_id"])
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
             try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"task": input["task"]},
-                    output_data={"error": str(exc)},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "general",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
             except Exception:
                 pass
-            return output

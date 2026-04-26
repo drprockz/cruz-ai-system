@@ -35,6 +35,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ---------------------------------------------------------------------------
+# KB service mock — autouse, applies to every test in this module
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all PULSE tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.pulse.pulse_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -584,3 +599,33 @@ class TestPulseLogging:
         ):
             out = await agent.process(_make_input())
         assert out["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base integration
+# ---------------------------------------------------------------------------
+
+
+class TestPulseKnowledgeBase:
+    @pytest.mark.asyncio
+    async def test_pulse_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        from agents.pulse.pulse_agent import PulseAgent
+        agent = PulseAgent()
+        with (
+            patch("agents.pulse.pulse_agent.get_db_service", return_value=_mock_db()),
+            patch("agents.pulse.pulse_agent.OllamaService", return_value=_mock_ollama()),
+            patch("agents.pulse.pulse_agent.SemanticMemoryService", return_value=_mock_semantic_memory()),
+            patch("agents.pulse.pulse_agent.get_qdrant_service"),
+            patch("agents.pulse.pulse_agent.get_embedding_service"),
+            patch("agents.pulse.pulse_agent._fetch_calendar_events", return_value=[]),
+        ):
+            await agent.process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_pulse_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        from agents.pulse.pulse_agent import PulseAgent
+        assert PulseAgent.KNOWLEDGE_RINGS == ["cruz_activities", "cruz_domain_knowledge"]

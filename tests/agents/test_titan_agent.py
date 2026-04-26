@@ -55,6 +55,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all TITAN tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.titan.titan_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -604,3 +619,32 @@ class TestTitanAutoRollback:
         second_body = str(client.post.call_args_list[1])
         assert "svc_prev" in second_body
         assert result["result"]["rolled_back"] is True
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+from agents.titan.titan_agent import TitanAgent  # noqa: E402
+
+
+@pytest.mark.asyncio
+class TestTitanKnowledgeBase:
+    async def test_titan_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        agent = TitanAgent()
+        with patch("agents.titan.titan_agent.httpx.AsyncClient") as mock_cls, \
+             patch("agents.titan.titan_agent.get_db_service"):
+            _setup_vercel_mock(mock_cls)
+            await agent.process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_titan_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert TitanAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_projects_docs",
+        ]

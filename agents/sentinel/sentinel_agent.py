@@ -40,6 +40,7 @@ import httpx
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.github import GitHubService
+from services.knowledge_base import get_kb_service
 
 logger = logging.getLogger("cruz.agents.SENTINEL")
 
@@ -87,6 +88,8 @@ class SentinelAgent(BaseAgent):
     posting inline comments to a shared PR is visible to the team.
     """
 
+    KNOWLEDGE_RINGS: list[str] = ["cruz_activities", "cruz_projects_docs"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "SENTINEL"
@@ -96,7 +99,45 @@ class SentinelAgent(BaseAgent):
         db = get_db_service()
         repo = input["context"].get("repo", "")
         pr_number = input["context"].get("pr_number", 0)
+        output: Optional[AgentOutput] = None
 
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
+
+        try:
+            output = await self._do_review(input, start, db, repo, pr_number, kb_context)
+            return output
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "sentinel",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
+
+    async def _do_review(
+        self,
+        input: AgentInput,
+        start: float,
+        db: Any,
+        repo: str,
+        pr_number: int,
+        kb_context: str,
+    ) -> AgentOutput:
         # ── Fetch PR from GitHub ──────────────────────────────────────────
         try:
             pr_meta, files = await self._fetch_pr(repo, pr_number)
@@ -131,7 +172,7 @@ class SentinelAgent(BaseAgent):
 
         # ── Review with Claude ────────────────────────────────────────────
         try:
-            review, tokens_used = await self._review_with_claude(diff_context, input["trace_id"])
+            review, tokens_used = await self._review_with_claude(diff_context, input["trace_id"], kb_context)
         except Exception as exc:
             err = f"Claude review failed: {exc}"
             logger.warning("[%s] %s", input["trace_id"], err)
@@ -310,15 +351,18 @@ class SentinelAgent(BaseAgent):
         return pr_meta, files
 
     async def _review_with_claude(
-        self, diff_context: str, trace_id: str
+        self, diff_context: str, trace_id: str, kb_context: str = ""
     ) -> tuple[Dict[str, Any], int]:
         """Send diff to Claude and parse review JSON. Returns (review, tokens_used)."""
+        system_prompt = _REVIEW_SYSTEM
+        if kb_context:
+            system_prompt = kb_context + "\n\n" + system_prompt
         response = await llm_chat(
             system="",  # SENTINEL folds the system prompt into the user message
             messages=[
                 {
                     "role": "user",
-                    "content": f"{_REVIEW_SYSTEM}\n\nPull request diff:\n\n{diff_context}",
+                    "content": f"{system_prompt}\n\nPull request diff:\n\n{diff_context}",
                 }
             ],
             max_tokens=4096,

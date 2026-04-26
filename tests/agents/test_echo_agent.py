@@ -22,6 +22,21 @@ from agents.echo.echo_agent import EchoAgent, EmailDraft
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all ECHO tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.echo.echo_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -676,3 +691,32 @@ class TestEchoSendMode:
 
         agent.log.assert_called_once()
         assert agent.log.call_args.kwargs["status"] == "error"
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+class TestEchoKnowledgeBase:
+    async def test_echo_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        agent = EchoAgent()
+        mock_ollama = AsyncMock()
+        mock_ollama.generate = AsyncMock(return_value=_make_ollama_json_response(
+            "a@b.com", "S", "B"
+        ))
+
+        with patch("agents.echo.echo_agent.OllamaService", return_value=mock_ollama):
+            await agent.process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_echo_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert EchoAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_projects_docs",
+            "cruz_user_patterns",
+        ]

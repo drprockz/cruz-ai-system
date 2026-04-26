@@ -40,6 +40,7 @@ import httpx
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.embedding import get_embedding_service
+from services.knowledge_base import get_kb_service
 from services.ollama import OllamaService
 from services.qdrant import get_qdrant_service
 from services.semantic_memory import SemanticMemoryService
@@ -67,6 +68,8 @@ class PulseAgent(BaseAgent):
     requires_approval=False — read-only.
     """
 
+    KNOWLEDGE_RINGS: list[str] = ["cruz_activities", "cruz_domain_knowledge"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "PULSE"
@@ -75,88 +78,119 @@ class PulseAgent(BaseAgent):
         start = time.monotonic()
         db = get_db_service()
         today = datetime.date.today().isoformat()
+        output: AgentOutput | None = None
 
-        # ── Gather all data sources (all non-fatal) ───────────────────
-        calendar_events = await self._gather_calendar()
-        overnight_research = await self._gather_research()
-        overnight_agents = await self._gather_overnight_agents(db)
-        pending_tasks = await self._gather_pending_tasks(db)
-
-        # ── Build briefing prompt ─────────────────────────────────────
-        prompt = _build_prompt(
-            today=today,
-            calendar_events=calendar_events,
-            overnight_research=overnight_research,
-            overnight_agents=overnight_agents,
-            pending_tasks=pending_tasks,
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
         )
 
-        # ── Generate summary ──────────────────────────────────────────
         try:
-            summary, tokens_used = await self._generate(prompt, input["trace_id"])
-        except Exception as exc:
-            err = str(exc)
+            # ── Gather all data sources (all non-fatal) ───────────────────
+            calendar_events = await self._gather_calendar()
+            overnight_research = await self._gather_research()
+            overnight_agents = await self._gather_overnight_agents(db)
+            pending_tasks = await self._gather_pending_tasks(db)
+
+            # ── Build briefing prompt ─────────────────────────────────────
+            prompt = _build_prompt(
+                today=today,
+                calendar_events=calendar_events,
+                overnight_research=overnight_research,
+                overnight_agents=overnight_agents,
+                pending_tasks=pending_tasks,
+            )
+            if kb_context:
+                prompt = kb_context + "\n\n" + prompt
+
+            # ── Generate summary ──────────────────────────────────────────
+            try:
+                summary, tokens_used = await self._generate(prompt, input["trace_id"])
+            except Exception as exc:
+                err = str(exc)
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"date": today},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            result = {
+                "date": today,
+                "calendar_events": calendar_events,
+                "overnight_research": overnight_research,
+                "overnight_agents": overnight_agents,
+                "pending_tasks": pending_tasks,
+                "summary": summary,
+            }
+
             duration = int((time.monotonic() - start) * 1000)
             try:
                 await self.log(
                     db=db,
                     trace_id=input["trace_id"],
-                    status="error",
+                    status="success",
                     input_data={"date": today},
-                    output_data={"error": err},
-                    tokens_used=0,
+                    output_data={
+                        "events": len(calendar_events),
+                        "agents": len(overnight_agents),
+                        "tasks": len(pending_tasks),
+                    },
+                    tokens_used=tokens_used,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
-            return AgentOutput(
-                success=False,
-                result=None,
+
+            output = AgentOutput(
+                success=True,
+                result=result,
                 agent=self.name,
                 duration_ms=duration,
-                tokens_used=0,
-                error=err,
+                tokens_used=tokens_used,
+                error=None,
                 requires_approval=False,
                 approval_prompt=None,
             )
+            return output
 
-        result = {
-            "date": today,
-            "calendar_events": calendar_events,
-            "overnight_research": overnight_research,
-            "overnight_agents": overnight_agents,
-            "pending_tasks": pending_tasks,
-            "summary": summary,
-        }
-
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"date": today},
-                output_data={
-                    "events": len(calendar_events),
-                    "agents": len(overnight_agents),
-                    "tasks": len(pending_tasks),
-                },
-                tokens_used=tokens_used,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=True,
-            result=result,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=tokens_used,
-            error=None,
-            requires_approval=False,
-            approval_prompt=None,
-        )
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "pulse",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     # ── Data gathering (all non-fatal) ────────────────────────────────
 

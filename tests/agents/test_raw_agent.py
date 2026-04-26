@@ -33,6 +33,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ---------------------------------------------------------------------------
+# KB service mock — autouse, applies to every test in this module
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all RAW tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    mock_kb.write_domain_knowledge = AsyncMock()
+    with patch("agents.raw.raw_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -573,3 +588,49 @@ class TestRawLogging:
         ):
             out = await agent.process(_make_input())
         assert out["success"] is True  # log failure must not crash agent
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base integration
+# ---------------------------------------------------------------------------
+
+class TestRawKnowledgeBase:
+    def test_raw_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        from agents.raw.raw_agent import RawAgent
+        assert RawAgent.KNOWLEDGE_RINGS == ["cruz_activities", "cruz_domain_knowledge"]
+
+    @pytest.mark.asyncio
+    async def test_raw_calls_kb_build_context_and_record_activity(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        from agents.raw.raw_agent import RawAgent
+        agent = RawAgent()
+        db = _mock_db()
+        sem = _mock_semantic_memory()
+        with (
+            patch("agents.raw.raw_agent.get_db_service", return_value=db),
+            patch("agents.raw.raw_agent.OllamaService", return_value=_mock_ollama()),
+            patch("agents.raw.raw_agent.SemanticMemoryService", return_value=sem),
+            patch("agents.raw.raw_agent.get_qdrant_service"),
+            patch("agents.raw.raw_agent.get_embedding_service"),
+        ):
+            await agent.process(_make_input())
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raw_calls_write_domain_knowledge(self, mock_kb_service):
+        """RAW must write its research output to cruz_domain_knowledge."""
+        from agents.raw.raw_agent import RawAgent
+        agent = RawAgent()
+        db = _mock_db()
+        sem = _mock_semantic_memory()
+        with (
+            patch("agents.raw.raw_agent.get_db_service", return_value=db),
+            patch("agents.raw.raw_agent.OllamaService", return_value=_mock_ollama("Research findings about asyncio")),
+            patch("agents.raw.raw_agent.SemanticMemoryService", return_value=sem),
+            patch("agents.raw.raw_agent.get_qdrant_service"),
+            patch("agents.raw.raw_agent.get_embedding_service"),
+        ):
+            await agent.process(_make_input())
+        assert mock_kb_service.write_domain_knowledge.await_count >= 1

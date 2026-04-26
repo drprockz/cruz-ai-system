@@ -43,6 +43,7 @@ from services.alerts import get_alert_service
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
+from services.knowledge_base import get_kb_service
 from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
@@ -283,6 +284,26 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["task"],
         },
     },
+    {
+        "name": "record_pattern_observation",
+        "description": (
+            "Call this when the user's message is a behavioral correction — "
+            "e.g. 'no, use formal tone', 'always use snake_case', "
+            "'stop adding comments'. Records the observation toward learning "
+            "Darshan's preferences. agent_name is the agent whose output was corrected."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name":        {"type": "string"},
+                "interaction_type":  {"type": "string",
+                                      "description": "e.g. email_draft_edited, code_edited"},
+                "observed_pattern":  {"type": "string",
+                                      "description": "The preference rule observed"},
+            },
+            "required": ["agent_name", "interaction_type", "observed_pattern"],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -310,6 +331,8 @@ class CruzAgent(BaseAgent):
     specialist agents, and returns the final response to the caller.
     """
 
+    KNOWLEDGE_RINGS: List[str] = ["cruz_activities", "cruz_user_patterns"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "CRUZ"
@@ -317,6 +340,16 @@ class CruzAgent(BaseAgent):
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
         total_tokens = 0
+        output: Optional[AgentOutput] = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
         try:
             # LLM routing happens via services.llm — backend chosen by
@@ -410,6 +443,8 @@ class CruzAgent(BaseAgent):
                 f"Never say you 'can't access real-time data' — this runtime context IS real-time."
             )
             system_prompt = _SYSTEM_PROMPT + runtime_context
+            if kb_context:
+                system_prompt = kb_context + "\n\n" + system_prompt
             max_reply_tokens = 8096
             if device in ("mac_mini", "phone", "ipad"):
                 system_prompt = system_prompt + (
@@ -502,7 +537,7 @@ class CruzAgent(BaseAgent):
                         tokens_used=total_tokens,
                         duration_ms=duration,
                     )
-                    return AgentOutput(
+                    output = AgentOutput(
                         success=True,
                         result=text,
                         agent=self.name,
@@ -512,6 +547,7 @@ class CruzAgent(BaseAgent):
                         requires_approval=False,
                         approval_prompt=None,
                     )
+                    return output
 
                 # --------------------------------------------------------
                 # Tool use — dispatch and collect results
@@ -522,6 +558,23 @@ class CruzAgent(BaseAgent):
 
                     for block in response.content:
                         if block.type != "tool_use":
+                            continue
+
+                        # ── Built-in tool: record pattern observation ────
+                        if block.name == "record_pattern_observation":
+                            tool_input = block.input or {}
+                            await kb.observe_interaction(
+                                tool_input.get("agent_name", "unknown"),
+                                tool_input.get("interaction_type", "unknown"),
+                                tool_input.get("observed_pattern", ""),
+                            )
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": str({"recorded": True}),
+                                }
+                            )
                             continue
 
                         agent_output = await self._dispatch_tool(
@@ -546,7 +599,7 @@ class CruzAgent(BaseAgent):
                         )
 
                     if approval_gate is not None:
-                        return AgentOutput(
+                        output = AgentOutput(
                             success=True,
                             result=approval_gate.get("result"),
                             agent=self.name,
@@ -556,6 +609,7 @@ class CruzAgent(BaseAgent):
                             requires_approval=True,
                             approval_prompt=approval_gate.get("approval_prompt"),
                         )
+                        return output
 
                     # Feed tool results back to Claude for the final response
                     messages.append({"role": "assistant", "content": response.content})
@@ -564,7 +618,7 @@ class CruzAgent(BaseAgent):
 
                 # Unexpected stop_reason — treat as end of loop
                 text = _extract_text(response.content)
-                return AgentOutput(
+                output = AgentOutput(
                     success=True,
                     result=text or "",
                     agent=self.name,
@@ -574,6 +628,7 @@ class CruzAgent(BaseAgent):
                     requires_approval=False,
                     approval_prompt=None,
                 )
+                return output
 
         except Exception as exc:
             output = self.handle_error(exc, input["trace_id"])
@@ -598,6 +653,22 @@ class CruzAgent(BaseAgent):
             except Exception:
                 pass  # log() already swallows, but guard against db init failure
             return output
+
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "cruz",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     async def _dispatch_tool(
         self,
@@ -653,178 +724,227 @@ class CruzAgent(BaseAgent):
         import uuid as _uuid
         start = _time.monotonic()
         total_tokens = 0
+        success: bool = False
+        final_text: str = ""
 
-        db = get_db_service()
-        conv_service = ConversationService(db)
-        await conv_service.get_or_create_conversation(conversation_id)
-        history = await conv_service.load_history(conversation_id)
-
-        sem_service = SemanticMemoryService(
-            get_qdrant_service(), get_embedding_service()
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            task,
+            self.KNOWLEDGE_RINGS,
+            trace_id,
         )
+
         try:
-            semantic_hits = await sem_service.search_similar(task, limit=10)
-        except Exception as exc:
-            logger.warning(
-                "semantic memory unavailable (continuing without): %s", exc
-            )
-            semantic_hits = []
+            db = get_db_service()
+            conv_service = ConversationService(db)
+            await conv_service.get_or_create_conversation(conversation_id)
+            history = await conv_service.load_history(conversation_id)
 
-        messages: List[Dict[str, Any]] = [
-            *semantic_hits, *history, {"role": "user", "content": task},
-        ]
-
-        tools = CRUZ_TOOLS
-        hint = classify(task)
-        if hint:
-            f = [t for t in CRUZ_TOOLS if t["name"] == hint]
-            if f:
-                tools = f
-
-        now = datetime.now().astimezone()
-        runtime_context = (
-            f"\n\n## Runtime context (authoritative — use this, ignore any prior replies that contradict it)\n"
-            f"- Current datetime: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}\n"
-            f"- User: Darshan Parmar (freelance full-stack developer)\n"
-            f"- Host: Mac Mini M4, accessed from phone/ipad/thinkpad/mac\n"
-            f"- When asked the time or date, answer directly from the datetime above. "
-            f"Never say you 'can't access real-time data' — this runtime context IS real-time."
-        )
-        system_prompt = _SYSTEM_PROMPT + runtime_context
-        max_reply_tokens = 512 if device in ("mac_mini", "phone", "ipad") else 4096
-        if device in ("mac_mini", "phone", "ipad"):
-            system_prompt += (
-                "\n\nIMPORTANT: Voice mode — reply in 1-2 plain sentences under 40 words. "
-                "No markdown, no lists."
-            )
-
-        # Persona v1 augmentation — same pattern as process(). Fail-soft.
-        try:
-            from agents.cruz.persona import PersonaLayer
-            from agents.cruz.persona.relationship_memory import quick_profile
-            try:
-                profile = await quick_profile(db, user_id="darshan")
-            except Exception:
-                profile = None
-            system_prompt = PersonaLayer.get().augment_system_prompt(
-                base=system_prompt,
-                task=task,
-                device=device,
-                now=now,
-                profile=profile,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[%s] persona augmentation skipped in stream_response: %s",
-                trace_id, exc,
-            )
-
-        # Buffer all sentences for persistence + faithful history rebuild.
-        final_text_parts: List[str] = []
-
-        while True:
-            pending_tools: List[ToolUseEvent] = []
-            turn_text_parts: List[str] = []
-
-            async def _text_token_stream():
-                nonlocal total_tokens
-                async for ev in llm_chat_stream(
-                    system=system_prompt, messages=messages,
-                    tools=tools, max_tokens=max_reply_tokens,
-                ):
-                    if isinstance(ev, TextDeltaEvent):
-                        turn_text_parts.append(ev.delta)
-                        yield ev.delta
-                    elif isinstance(ev, ToolUseEvent):
-                        pending_tools.append(ev)
-                    elif isinstance(ev, _LLMDone):
-                        total_tokens += ev.usage.input_tokens + ev.usage.output_tokens
-
-            async for sentence in _sentence_stream(_text_token_stream()):
-                final_text_parts.append(sentence)
-                yield Text(content=sentence)
-
-            if not pending_tools:
-                break
-
-            # Dispatch tools
-            tool_result_blocks = []
-            for tu in pending_tools:
-                yield ToolStart(
-                    agent=tu.name,
-                    summary=_TOOL_INTRO.get(tu.name, f"Running {tu.name}."),
-                )
-                out = await self._dispatch_tool(
-                    tool_name=tu.name, tool_input=tu.input,
-                    trace_id=trace_id, conversation_id=conversation_id,
-                )
-                if out.get("requires_approval"):
-                    yield ApprovalRequired(
-                        agent=tu.name,
-                        prompt=out.get("approval_prompt") or "",
-                        payload=tu.input,
-                    )
-                    yield Done(
-                        tokens_used=total_tokens,
-                        duration_ms=int((_time.monotonic() - start) * 1000),
-                    )
-                    return
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu.tool_use_id,
-                    "content": str(out.get("result", "")),
-                })
-                yield ToolFinish(
-                    agent=tu.name,
-                    result_preview=str(out.get("result", ""))[:200],
-                )
-
-            # Reconstruct assistant turn (include any pre-tool text)
-            assistant_content: List[Dict[str, Any]] = []
-            joined_turn_text = "".join(turn_text_parts).strip()
-            if joined_turn_text:
-                assistant_content.append({"type": "text", "text": joined_turn_text})
-            for tu in pending_tools:
-                assistant_content.append({
-                    "type": "tool_use", "id": tu.tool_use_id,
-                    "name": tu.name, "input": tu.input,
-                })
-            messages.append({"role": "assistant", "content": assistant_content})
-            messages.append({"role": "user", "content": tool_result_blocks})
-
-        # Persist — matches process() parity
-        final_text = " ".join(final_text_parts).strip()
-        if final_text:
-            await conv_service.save_exchange(
-                conversation_id=conversation_id,
-                user_task=task,
-                assistant_result=final_text,
+            sem_service = SemanticMemoryService(
+                get_qdrant_service(), get_embedding_service()
             )
             try:
+                semantic_hits = await sem_service.search_similar(task, limit=10)
+            except Exception as exc:
+                logger.warning(
+                    "semantic memory unavailable (continuing without): %s", exc
+                )
+                semantic_hits = []
+
+            messages: List[Dict[str, Any]] = [
+                *semantic_hits, *history, {"role": "user", "content": task},
+            ]
+
+            tools = CRUZ_TOOLS
+            hint = classify(task)
+            if hint:
+                f = [t for t in CRUZ_TOOLS if t["name"] == hint]
+                if f:
+                    tools = f
+
+            now = datetime.now().astimezone()
+            runtime_context = (
+                f"\n\n## Runtime context (authoritative — use this, ignore any prior replies that contradict it)\n"
+                f"- Current datetime: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}\n"
+                f"- User: Darshan Parmar (freelance full-stack developer)\n"
+                f"- Host: Mac Mini M4, accessed from phone/ipad/thinkpad/mac\n"
+                f"- When asked the time or date, answer directly from the datetime above. "
+                f"Never say you 'can't access real-time data' — this runtime context IS real-time."
+            )
+            system_prompt = _SYSTEM_PROMPT + runtime_context
+            if kb_context:
+                system_prompt = kb_context + "\n\n" + system_prompt
+            max_reply_tokens = 512 if device in ("mac_mini", "phone", "ipad") else 4096
+            if device in ("mac_mini", "phone", "ipad"):
+                system_prompt += (
+                    "\n\nIMPORTANT: Voice mode — reply in 1-2 plain sentences under 40 words. "
+                    "No markdown, no lists."
+                )
+
+            # Persona v1 augmentation — same pattern as process(). Fail-soft.
+            try:
+                from agents.cruz.persona import PersonaLayer
+                from agents.cruz.persona.relationship_memory import quick_profile
                 try:
-                    from agents.cruz.persona import PersonaLayer as _PL
-                    _p = _PL.get()
-                    _u = _p.sanitize_for_memory(task)
-                    _t = _p.sanitize_for_memory(final_text)
+                    profile = await quick_profile(db, user_id="darshan")
                 except Exception:
-                    _u, _t = task, final_text
-                await sem_service.store(
-                    id=str(_uuid.uuid4()), role="user",
-                    content=_u, conversation_id=conversation_id,
-                )
-                await sem_service.store(
-                    id=str(_uuid.uuid4()), role="assistant",
-                    content=_t, conversation_id=conversation_id,
+                    profile = None
+                system_prompt = PersonaLayer.get().augment_system_prompt(
+                    base=system_prompt,
+                    task=task,
+                    device=device,
+                    now=now,
+                    profile=profile,
                 )
             except Exception as exc:
                 logger.warning(
-                    "semantic memory store failed (non-fatal): %s", exc
+                    "[%s] persona augmentation skipped in stream_response: %s",
+                    trace_id, exc,
                 )
 
-        yield Done(
-            tokens_used=total_tokens,
-            duration_ms=int((_time.monotonic() - start) * 1000),
-        )
+            # Buffer all sentences for persistence + faithful history rebuild.
+            final_text_parts: List[str] = []
+
+            while True:
+                pending_tools: List[ToolUseEvent] = []
+                turn_text_parts: List[str] = []
+
+                async def _text_token_stream():
+                    nonlocal total_tokens
+                    async for ev in llm_chat_stream(
+                        system=system_prompt, messages=messages,
+                        tools=tools, max_tokens=max_reply_tokens,
+                    ):
+                        if isinstance(ev, TextDeltaEvent):
+                            turn_text_parts.append(ev.delta)
+                            yield ev.delta
+                        elif isinstance(ev, ToolUseEvent):
+                            pending_tools.append(ev)
+                        elif isinstance(ev, _LLMDone):
+                            total_tokens += ev.usage.input_tokens + ev.usage.output_tokens
+
+                async for sentence in _sentence_stream(_text_token_stream()):
+                    final_text_parts.append(sentence)
+                    yield Text(content=sentence)
+
+                if not pending_tools:
+                    break
+
+                # Dispatch tools
+                tool_result_blocks = []
+                approval_hit = False
+                for tu in pending_tools:
+                    # ── Built-in tool: record pattern observation ────
+                    if tu.name == "record_pattern_observation":
+                        ti = tu.input or {}
+                        await kb.observe_interaction(
+                            ti.get("agent_name", "unknown"),
+                            ti.get("interaction_type", "unknown"),
+                            ti.get("observed_pattern", ""),
+                        )
+                        tool_result_blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_use_id,
+                            "content": str({"recorded": True}),
+                        })
+                        continue
+
+                    yield ToolStart(
+                        agent=tu.name,
+                        summary=_TOOL_INTRO.get(tu.name, f"Running {tu.name}."),
+                    )
+                    out = await self._dispatch_tool(
+                        tool_name=tu.name, tool_input=tu.input,
+                        trace_id=trace_id, conversation_id=conversation_id,
+                    )
+                    if out.get("requires_approval"):
+                        yield ApprovalRequired(
+                            agent=tu.name,
+                            prompt=out.get("approval_prompt") or "",
+                            payload=tu.input,
+                        )
+                        yield Done(
+                            tokens_used=total_tokens,
+                            duration_ms=int((_time.monotonic() - start) * 1000),
+                        )
+                        success = True
+                        approval_hit = True
+                        break
+                    tool_result_blocks.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.tool_use_id,
+                        "content": str(out.get("result", "")),
+                    })
+                    yield ToolFinish(
+                        agent=tu.name,
+                        result_preview=str(out.get("result", ""))[:200],
+                    )
+
+                if approval_hit:
+                    return
+
+                # Reconstruct assistant turn (include any pre-tool text)
+                assistant_content: List[Dict[str, Any]] = []
+                joined_turn_text = "".join(turn_text_parts).strip()
+                if joined_turn_text:
+                    assistant_content.append({"type": "text", "text": joined_turn_text})
+                for tu in pending_tools:
+                    assistant_content.append({
+                        "type": "tool_use", "id": tu.tool_use_id,
+                        "name": tu.name, "input": tu.input,
+                    })
+                messages.append({"role": "assistant", "content": assistant_content})
+                messages.append({"role": "user", "content": tool_result_blocks})
+
+            # Persist — matches process() parity
+            final_text = " ".join(final_text_parts).strip()
+            if final_text:
+                await conv_service.save_exchange(
+                    conversation_id=conversation_id,
+                    user_task=task,
+                    assistant_result=final_text,
+                )
+                try:
+                    try:
+                        from agents.cruz.persona import PersonaLayer as _PL
+                        _p = _PL.get()
+                        _u = _p.sanitize_for_memory(task)
+                        _t = _p.sanitize_for_memory(final_text)
+                    except Exception:
+                        _u, _t = task, final_text
+                    await sem_service.store(
+                        id=str(_uuid.uuid4()), role="user",
+                        content=_u, conversation_id=conversation_id,
+                    )
+                    await sem_service.store(
+                        id=str(_uuid.uuid4()), role="assistant",
+                        content=_t, conversation_id=conversation_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "semantic memory store failed (non-fatal): %s", exc
+                    )
+
+            success = True
+            yield Done(
+                tokens_used=total_tokens,
+                duration_ms=int((_time.monotonic() - start) * 1000),
+            )
+
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                await kb.record_agent_activity(
+                    "cruz",
+                    task,
+                    final_text[:200],
+                    success,
+                    trace_id,
+                    tokens_used=total_tokens,
+                )
+            except Exception:
+                pass
 
 
 def _extract_text(content: List[Any]) -> str:

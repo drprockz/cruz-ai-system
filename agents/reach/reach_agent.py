@@ -52,6 +52,7 @@ import httpx
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.email import EmailService
+from services.knowledge_base import get_kb_service
 from services.ollama import OllamaService
 
 logger = logging.getLogger("cruz.agents.REACH")
@@ -117,6 +118,11 @@ class ReachAgent(BaseAgent):
     Always returns requires_approval=True — sending emails is external and irreversible.
     """
 
+    KNOWLEDGE_RINGS: list[str] = [
+        "cruz_activities",
+        "cruz_domain_knowledge",
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "REACH"
@@ -125,110 +131,170 @@ class ReachAgent(BaseAgent):
         start = time.monotonic()
         db = get_db_service()
         total_tokens = 0
+        output: Optional[AgentOutput] = None
 
-        # ── Stage 1: Discover leads via Gemini ───────────────────────────
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
+        kb_prefix = (kb_context + "\n\n") if kb_context else ""
+
         try:
-            leads = await self._discover_leads(input["task"])
-        except Exception as exc:
-            err = f"Lead discovery failed: {exc}"
-            logger.warning("[%s] %s", input["trace_id"], err)
+            # ── Stage 1: Discover leads via Gemini ───────────────────────────
             try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"task": input["task"]},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
-            )
-
-        if not leads:
-            err = "No leads found matching the criteria"
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"task": input["task"]},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
-            )
-
-        # ── Stage 2: Personalise outreach per lead ────────────────────────
-        enriched_leads: List[Dict[str, Any]] = []
-        for lead in leads:
-            outreach, tokens = await self._personalise_lead(lead, input["task"], input["trace_id"])
-            total_tokens += tokens
-            enriched_leads.append({**lead, "outreach": outreach})
-
-        total = len(enriched_leads)
-
-        # ── Send mode: context["send"]=True → send each outreach now ─────
-        if input["context"].get("send") is True:
-            email_svc = EmailService()
-            sent_count = 0
-            failed_count = 0
-            for lead in enriched_leads:
-                outreach = lead.get("outreach")
-                to = (lead.get("email") or "").strip()
-                if not outreach or not to:
-                    # Skip: personalisation failed OR no email on lead
-                    lead["sent"] = False
-                    lead["skip_reason"] = (
-                        "no outreach draft" if not outreach else "no email"
-                    )
-                    continue
+                leads = await self._discover_leads(input["task"], kb_prefix)
+            except Exception as exc:
+                err = f"Lead discovery failed: {exc}"
+                logger.warning("[%s] %s", input["trace_id"], err)
                 try:
-                    send_result = await email_svc.send(
-                        to=to,
-                        subject=outreach["subject"],
-                        body=outreach["body"],
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"task": input["task"]},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
                     )
-                    lead["sent"] = True
-                    lead["message_id"] = send_result.get("message_id", "")
-                    sent_count += 1
-                except Exception as send_exc:
-                    lead["sent"] = False
-                    lead["send_error"] = str(send_exc)
-                    failed_count += 1
-                    logger.warning(
-                        "[%s] REACH send failed for %s: %s",
-                        input["trace_id"], to, send_exc,
-                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
 
+            if not leads:
+                err = "No leads found matching the criteria"
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"task": input["task"]},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Stage 2: Personalise outreach per lead ────────────────────────
+            enriched_leads: List[Dict[str, Any]] = []
+            for lead in leads:
+                outreach, tokens = await self._personalise_lead(
+                    lead, input["task"], input["trace_id"], kb_prefix
+                )
+                total_tokens += tokens
+                enriched_leads.append({**lead, "outreach": outreach})
+
+            total = len(enriched_leads)
+
+            # ── Send mode: context["send"]=True → send each outreach now ─────
+            if input["context"].get("send") is True:
+                email_svc = EmailService()
+                sent_count = 0
+                failed_count = 0
+                for lead in enriched_leads:
+                    outreach = lead.get("outreach")
+                    to = (lead.get("email") or "").strip()
+                    if not outreach or not to:
+                        # Skip: personalisation failed OR no email on lead
+                        lead["sent"] = False
+                        lead["skip_reason"] = (
+                            "no outreach draft" if not outreach else "no email"
+                        )
+                        continue
+                    try:
+                        send_result = await email_svc.send(
+                            to=to,
+                            subject=outreach["subject"],
+                            body=outreach["body"],
+                        )
+                        lead["sent"] = True
+                        lead["message_id"] = send_result.get("message_id", "")
+                        sent_count += 1
+                    except Exception as send_exc:
+                        lead["sent"] = False
+                        lead["send_error"] = str(send_exc)
+                        failed_count += 1
+                        logger.warning(
+                            "[%s] REACH send failed for %s: %s",
+                            input["trace_id"], to, send_exc,
+                        )
+
+                result = {
+                    "criteria": input["task"],
+                    "total": total,
+                    "sent_count": sent_count,
+                    "failed_count": failed_count,
+                    "leads": enriched_leads,
+                }
+
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="success",
+                        input_data={"task": input["task"], "mode": "send"},
+                        output_data={
+                            "total": total,
+                            "sent_count": sent_count,
+                            "failed_count": failed_count,
+                        },
+                        tokens_used=total_tokens,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+
+                output = AgentOutput(
+                    success=True,
+                    result=result,
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=total_tokens,
+                    error=None,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Draft-only (default): return approval gate ────────────────────
             result = {
                 "criteria": input["task"],
                 "total": total,
-                "sent_count": sent_count,
-                "failed_count": failed_count,
                 "leads": enriched_leads,
             }
+
+            approval_prompt = (
+                f"Send outreach emails to {total} lead{'s' if total != 1 else ''}?\n"
+                f"  Criteria: {input['task']}\n"
+                f"  Leads with outreach drafts: {total}\n\n"
+                f"Reply 'yes' to send or 'no' to discard."
+            )
 
             duration = int((time.monotonic() - start) * 1000)
             try:
@@ -236,73 +302,49 @@ class ReachAgent(BaseAgent):
                     db=db,
                     trace_id=input["trace_id"],
                     status="success",
-                    input_data={"task": input["task"], "mode": "send"},
-                    output_data={
-                        "total": total,
-                        "sent_count": sent_count,
-                        "failed_count": failed_count,
-                    },
+                    input_data={"task": input["task"]},
+                    output_data={"total": total, "leads": [l["name"] for l in leads]},
                     tokens_used=total_tokens,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
 
-            return AgentOutput(
+            output = AgentOutput(
                 success=True,
                 result=result,
                 agent=self.name,
                 duration_ms=duration,
                 tokens_used=total_tokens,
                 error=None,
-                requires_approval=False,
-                approval_prompt=None,
+                requires_approval=True,
+                approval_prompt=approval_prompt,
             )
+            return output
 
-        # ── Draft-only (default): return approval gate ────────────────────
-        result = {
-            "criteria": input["task"],
-            "total": total,
-            "leads": enriched_leads,
-        }
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "reach",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
-        approval_prompt = (
-            f"Send outreach emails to {total} lead{'s' if total != 1 else ''}?\n"
-            f"  Criteria: {input['task']}\n"
-            f"  Leads with outreach drafts: {total}\n\n"
-            f"Reply 'yes' to send or 'no' to discard."
-        )
-
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"task": input["task"]},
-                output_data={"total": total, "leads": [l["name"] for l in leads]},
-                tokens_used=total_tokens,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=True,
-            result=result,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=total_tokens,
-            error=None,
-            requires_approval=True,
-            approval_prompt=approval_prompt,
-        )
-
-    async def _discover_leads(self, criteria: str) -> Optional[List[Dict[str, Any]]]:
+    async def _discover_leads(
+        self, criteria: str, kb_prefix: str = ""
+    ) -> Optional[List[Dict[str, Any]]]:
         """Call Gemini Flash 2.5 REST API to discover leads. Returns list or raises."""
         api_key = os.environ.get("GEMINI_API_KEY", "")
         url = f"{_GEMINI_API_BASE}/{_DISCOVERY_MODEL}:generateContent?key={api_key}"
-        prompt = f"{_DISCOVERY_SYSTEM}\n\nCriteria: {criteria}"
+        prompt = f"{kb_prefix}{_DISCOVERY_SYSTEM}\n\nCriteria: {criteria}"
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -324,6 +366,7 @@ class ReachAgent(BaseAgent):
         lead: Dict[str, Any],
         criteria: str,
         trace_id: str,
+        kb_prefix: str = "",
     ) -> tuple[Optional[Dict[str, Any]], int]:
         """
         Personalise outreach for a single lead.
@@ -332,7 +375,7 @@ class ReachAgent(BaseAgent):
         returns (None, 0) — non-fatal per the contract.
         """
         prompt = (
-            f"{_PERSONALISE_SYSTEM}\n\n"
+            f"{kb_prefix}{_PERSONALISE_SYSTEM}\n\n"
             f"Lead:\n"
             f"  Name: {lead.get('name', '')}\n"
             f"  Company: {lead.get('company', '')}\n"

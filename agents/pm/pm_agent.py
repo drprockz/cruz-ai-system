@@ -26,6 +26,7 @@ import anthropic
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.knowledge_base import get_kb_service
 from services.ollama import OllamaService
 from services.plane import PlaneService
 from typing_extensions import TypedDict
@@ -84,6 +85,11 @@ class PMAgent(BaseAgent):
     the user before any Linear tickets are created.
     """
 
+    KNOWLEDGE_RINGS: list[str] = [
+        "cruz_activities",
+        "cruz_projects_docs",
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "PM"
@@ -91,185 +97,218 @@ class PMAgent(BaseAgent):
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
         db = get_db_service()
+        output: Optional[AgentOutput] = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
+        system = _SYSTEM_PROMPT
+        if kb_context:
+            system = kb_context + "\n\n" + system
 
         try:
-            plan, tokens_used = await self._plan_with_ollama(input["task"])
-        except Exception as ollama_exc:
-            logger.warning(
-                "[%s] Ollama unavailable (%s) — falling back to Claude",
-                input["trace_id"],
-                ollama_exc,
-            )
             try:
-                plan, tokens_used = await self._plan_with_claude(input["task"])
-            except Exception as claude_exc:
-                output = self.handle_error(claude_exc, input["trace_id"])
+                plan, tokens_used = await self._plan_with_ollama(input["task"], system)
+            except Exception as ollama_exc:
+                logger.warning(
+                    "[%s] Ollama unavailable (%s) — falling back to Claude",
+                    input["trace_id"],
+                    ollama_exc,
+                )
+                try:
+                    plan, tokens_used = await self._plan_with_claude(input["task"], system)
+                except Exception as claude_exc:
+                    output = self.handle_error(claude_exc, input["trace_id"])
+                    try:
+                        await self.log(
+                            db=db,
+                            trace_id=input["trace_id"],
+                            status="error",
+                            input_data={"task": input["task"]},
+                            output_data={"error": str(claude_exc)},
+                            tokens_used=0,
+                            duration_ms=int((time.monotonic() - start) * 1000),
+                        )
+                    except Exception:
+                        pass
+                    return output
+
+            if plan is None:
+                err = "Could not parse a valid sprint plan from model response"
                 try:
                     await self.log(
                         db=db,
                         trace_id=input["trace_id"],
                         status="error",
                         input_data={"task": input["task"]},
-                        output_data={"error": str(claude_exc)},
-                        tokens_used=0,
+                        output_data={"error": err},
+                        tokens_used=tokens_used,
                         duration_ms=int((time.monotonic() - start) * 1000),
                     )
                 except Exception:
                     pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=tokens_used,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
                 return output
 
-        if plan is None:
-            err = "Could not parse a valid sprint plan from model response"
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"task": input["task"]},
-                    output_data={"error": err},
+            task_count = len(plan["tasks"])
+
+            # ── Send mode: context["send"]=True → create Plane issues ────────
+            ctx = input["context"]
+            if ctx.get("send") is True:
+                workspace_slug = ctx.get("workspace_slug", "")
+                project_id = ctx.get("project_id", "")
+                plane_svc = PlaneService()
+                created_count = 0
+                failed_count = 0
+                enriched_tasks: List[Dict[str, Any]] = []
+
+                for task in plan["tasks"]:
+                    enriched = dict(task)
+                    try:
+                        issue = await plane_svc.create_issue(
+                            workspace_slug=workspace_slug,
+                            project_id=project_id,
+                            title=task["title"],
+                            description=task.get("description", ""),
+                            priority=task.get("priority", "none"),
+                            labels=task.get("labels") or None,
+                        )
+                        enriched["created"] = True
+                        enriched["issue_id"] = issue.get("issue_id", "")
+                        enriched["issue_url"] = issue.get("url", "")
+                        created_count += 1
+                    except Exception as exc:
+                        enriched["created"] = False
+                        enriched["create_error"] = str(exc)
+                        failed_count += 1
+                        logger.warning(
+                            "[%s] PM Plane create failed for '%s': %s",
+                            input["trace_id"], task["title"], exc,
+                        )
+                    enriched_tasks.append(enriched)
+
+                send_result: Dict[str, Any] = {
+                    **dict(plan),
+                    "tasks": enriched_tasks,
+                    "created_count": created_count,
+                    "failed_count": failed_count,
+                }
+
+                duration = int((time.monotonic() - start) * 1000)
+                any_success = created_count > 0
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="success" if any_success else "error",
+                        input_data={
+                            "task": input["task"],
+                            "mode": "send",
+                            "workspace_slug": workspace_slug,
+                            "project_id": project_id,
+                        },
+                        output_data={
+                            "created_count": created_count,
+                            "failed_count": failed_count,
+                        },
+                        tokens_used=tokens_used,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+
+                output = AgentOutput(
+                    success=any_success,
+                    result=send_result,
+                    agent=self.name,
+                    duration_ms=duration,
                     tokens_used=tokens_used,
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    error=None if any_success else "All Plane create_issue calls failed",
+                    requires_approval=False,
+                    approval_prompt=None,
                 )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=tokens_used,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
+                return output
+
+            # ── Draft-only (default): approval gate ──────────────────────────
+            approval_prompt = (
+                f"Create {task_count} Plane issue{'s' if task_count != 1 else ''} "
+                f"for sprint '{plan['sprint_name']}'?\n"
+                f"  Goal: {plan['goal']}\n"
+                f"  Tasks: {task_count} items\n\n"
+                f"Reply 'yes' to create in Plane or 'no' to discard."
             )
 
-        task_count = len(plan["tasks"])
-
-        # ── Send mode: context["send"]=True → create Plane issues ────────
-        ctx = input["context"]
-        if ctx.get("send") is True:
-            workspace_slug = ctx.get("workspace_slug", "")
-            project_id = ctx.get("project_id", "")
-            plane_svc = PlaneService()
-            created_count = 0
-            failed_count = 0
-            enriched_tasks: List[Dict[str, Any]] = []
-
-            for task in plan["tasks"]:
-                enriched = dict(task)
-                try:
-                    issue = await plane_svc.create_issue(
-                        workspace_slug=workspace_slug,
-                        project_id=project_id,
-                        title=task["title"],
-                        description=task.get("description", ""),
-                        priority=task.get("priority", "none"),
-                        labels=task.get("labels") or None,
-                    )
-                    enriched["created"] = True
-                    enriched["issue_id"] = issue.get("issue_id", "")
-                    enriched["issue_url"] = issue.get("url", "")
-                    created_count += 1
-                except Exception as exc:
-                    enriched["created"] = False
-                    enriched["create_error"] = str(exc)
-                    failed_count += 1
-                    logger.warning(
-                        "[%s] PM Plane create failed for '%s': %s",
-                        input["trace_id"], task["title"], exc,
-                    )
-                enriched_tasks.append(enriched)
-
-            send_result: Dict[str, Any] = {
-                **dict(plan),
-                "tasks": enriched_tasks,
-                "created_count": created_count,
-                "failed_count": failed_count,
-            }
-
             duration = int((time.monotonic() - start) * 1000)
-            any_success = created_count > 0
             try:
                 await self.log(
                     db=db,
                     trace_id=input["trace_id"],
-                    status="success" if any_success else "error",
-                    input_data={
-                        "task": input["task"],
-                        "mode": "send",
-                        "workspace_slug": workspace_slug,
-                        "project_id": project_id,
-                    },
-                    output_data={
-                        "created_count": created_count,
-                        "failed_count": failed_count,
-                    },
+                    status="success",
+                    input_data={"task": input["task"]},
+                    output_data={"plan": dict(plan)},
                     tokens_used=tokens_used,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
 
-            return AgentOutput(
-                success=any_success,
-                result=send_result,
+            output = AgentOutput(
+                success=True,
+                result=plan,
                 agent=self.name,
                 duration_ms=duration,
                 tokens_used=tokens_used,
-                error=None if any_success else "All Plane create_issue calls failed",
-                requires_approval=False,
-                approval_prompt=None,
+                error=None,
+                requires_approval=True,
+                approval_prompt=approval_prompt,
             )
+            return output
 
-        # ── Draft-only (default): approval gate ──────────────────────────
-        approval_prompt = (
-            f"Create {task_count} Plane issue{'s' if task_count != 1 else ''} "
-            f"for sprint '{plan['sprint_name']}'?\n"
-            f"  Goal: {plan['goal']}\n"
-            f"  Tasks: {task_count} items\n\n"
-            f"Reply 'yes' to create in Plane or 'no' to discard."
-        )
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "pm",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"task": input["task"]},
-                output_data={"plan": dict(plan)},
-                tokens_used=tokens_used,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=True,
-            result=plan,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=tokens_used,
-            error=None,
-            requires_approval=True,
-            approval_prompt=approval_prompt,
-        )
-
-    async def _plan_with_ollama(self, task: str):
+    async def _plan_with_ollama(self, task: str, system: str = _SYSTEM_PROMPT):
         """Call Qwen via Ollama. Returns (plan, tokens_used) or raises."""
         ollama = OllamaService()
-        prompt = f"{_SYSTEM_PROMPT}\n\nUser request: {task}"
+        prompt = f"{system}\n\nUser request: {task}"
         response = await ollama.generate(model=_MODEL, prompt=prompt)
         raw_text: str = response.get("response", "")
         return _parse_plan(raw_text), 0  # local — no cloud token cost
 
-    async def _plan_with_claude(self, task: str):
+    async def _plan_with_claude(self, task: str, system: str = _SYSTEM_PROMPT):
         """Fallback: call Claude when Ollama is unavailable. Returns (plan, tokens_used)."""
         client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",  # cheapest model for planning
             max_tokens=2048,
-            messages=[{"role": "user", "content": f"{_SYSTEM_PROMPT}\n\nUser request: {task}"}],
+            messages=[{"role": "user", "content": f"{system}\n\nUser request: {task}"}],
         )
         raw_text = response.content[0].text
         tokens_used = response.usage.input_tokens + response.usage.output_tokens

@@ -27,6 +27,7 @@ from services.llm import chat as llm_chat
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
+from services.knowledge_base import get_kb_service
 
 logger = logging.getLogger("cruz.agents.FORGE")
 
@@ -275,6 +276,8 @@ class ForgeAgent(BaseAgent):
     or MAX_ITERATIONS is reached.
     """
 
+    KNOWLEDGE_RINGS: List[str] = ["cruz_activities", "cruz_projects_docs"]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "FORGE"
@@ -282,6 +285,19 @@ class ForgeAgent(BaseAgent):
     async def process(self, input: AgentInput) -> AgentOutput:
         start = time.monotonic()
         total_tokens = 0
+        output: Optional[AgentOutput] = None
+
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
+        system = _SYSTEM_PROMPT
+        if kb_context:
+            system = kb_context + "\n\n" + system
 
         try:
             messages: List[Dict[str, Any]] = [
@@ -290,7 +306,7 @@ class ForgeAgent(BaseAgent):
 
             for iteration in range(_MAX_ITERATIONS):
                 response = await llm_chat(
-                    system=_SYSTEM_PROMPT,
+                    system=system,
                     messages=messages,
                     tools=FORGE_TOOLS,
                     max_tokens=8096,
@@ -311,7 +327,7 @@ class ForgeAgent(BaseAgent):
                         tokens_used=total_tokens,
                         duration_ms=duration,
                     )
-                    return AgentOutput(
+                    output = AgentOutput(
                         success=True,
                         result=text,
                         agent=self.name,
@@ -321,6 +337,7 @@ class ForgeAgent(BaseAgent):
                         requires_approval=False,
                         approval_prompt=None,
                     )
+                    return output
 
                 # ── Tool use ─────────────────────────────────────────────
                 if response.stop_reason == "tool_use":
@@ -343,7 +360,7 @@ class ForgeAgent(BaseAgent):
 
                 # ── Unexpected stop_reason ───────────────────────────────
                 text = _extract_text(response.content)
-                return AgentOutput(
+                output = AgentOutput(
                     success=True,
                     result=text or "",
                     agent=self.name,
@@ -353,6 +370,7 @@ class ForgeAgent(BaseAgent):
                     requires_approval=False,
                     approval_prompt=None,
                 )
+                return output
 
             # ── Max iterations hit ────────────────────────────────────────
             logger.warning(
@@ -360,7 +378,7 @@ class ForgeAgent(BaseAgent):
                 input["trace_id"],
                 _MAX_ITERATIONS,
             )
-            return AgentOutput(
+            output = AgentOutput(
                 success=False,
                 result=None,
                 agent=self.name,
@@ -370,6 +388,7 @@ class ForgeAgent(BaseAgent):
                 requires_approval=False,
                 approval_prompt=None,
             )
+            return output
 
         except Exception as exc:
             output = self.handle_error(exc, input["trace_id"])
@@ -386,6 +405,22 @@ class ForgeAgent(BaseAgent):
             except Exception:
                 pass
             return output
+
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "forge",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Dispatch a tool call and return the result as a string."""

@@ -37,6 +37,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all QT tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.qt.qt_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -700,3 +715,27 @@ class TestPlaywrightOutputParsing:
         result = _parse_playwright_output("gibberish output")
         assert result["passed"] == 0
         assert result["failed"] == 0
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+class TestQTKnowledgeBase:
+    async def test_qt_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        from agents.qt.qt_agent import QTAgent
+        proc = _mock_process(returncode=0, stdout=_PYTEST_PASS_OUTPUT)
+        with patch("agents.qt.qt_agent.asyncio.create_subprocess_exec",
+                   new_callable=AsyncMock, return_value=proc), \
+             patch("agents.qt.qt_agent.get_db_service"):
+            await QTAgent().process(_make_input(test_type="pytest"))
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_qt_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        from agents.qt.qt_agent import QTAgent
+        assert QTAgent.KNOWLEDGE_RINGS == ["cruz_activities", "cruz_projects_docs"]

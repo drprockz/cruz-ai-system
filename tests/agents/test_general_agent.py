@@ -15,6 +15,16 @@ from agents.base_agent import AgentInput, AgentOutput
 from agents.general.general_agent import GeneralAgent
 
 
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all GENERAL tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.general.general_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
 class TestGeneralAgentIsBaseAgent:
     def test_general_agent_subclasses_base_agent(self):
         from agents.base_agent import BaseAgent
@@ -218,3 +228,34 @@ class TestGeneralAgentLogging:
                     "conversation_id": "conv-log-003",
                 })
         assert result["success"] is True
+
+
+class TestGeneralAgentKnowledgeBase:
+    def _make_mock_client(self, response_text: str = "answer") -> MagicMock:
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=response_text)]
+        mock_message.usage = MagicMock(input_tokens=10, output_tokens=20)
+        mock_client = MagicMock()
+        mock_client.messages = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_message)
+        return mock_client
+
+    async def test_general_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        client = self._make_mock_client("hi")
+        agent = GeneralAgent()
+        with patch("agents.general.general_agent.llm_chat", new=client.messages.create), \
+             patch("agents.general.general_agent.get_db_service"):
+            await agent.process({
+                "task": "hello",
+                "context": {},
+                "trace_id": "trace-gen-kb",
+                "conversation_id": "conv-gen-kb",
+            })
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_general_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert GeneralAgent.KNOWLEDGE_RINGS == ["cruz_activities"]

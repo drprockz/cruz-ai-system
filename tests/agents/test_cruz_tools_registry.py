@@ -13,6 +13,11 @@ from __future__ import annotations
 
 from agents.cruz.cruz_agent import CRUZ_TOOLS, _TOOL_AGENT_MAP
 
+# Built-in CRUZ tools handled inline (not delegated to a specialist agent).
+# These are advertised in CRUZ_TOOLS but intentionally absent from
+# _TOOL_AGENT_MAP — CruzAgent.process() dispatches them directly.
+_BUILTIN_TOOLS = {"record_pattern_observation"}
+
 
 class TestCruzToolRegistryConsistency:
     def test_every_mapped_agent_is_advertised(self):
@@ -27,9 +32,12 @@ class TestCruzToolRegistryConsistency:
         )
 
     def test_every_advertised_tool_has_a_dispatcher(self):
-        """Guards the reverse: no CRUZ_TOOLS entry without a mapped agent."""
+        """Guards the reverse: no CRUZ_TOOLS entry without a mapped agent.
+
+        Built-in tools (handled inline by CruzAgent) are exempt.
+        """
         tool_names = {t["name"] for t in CRUZ_TOOLS}
-        mapped = set(_TOOL_AGENT_MAP.keys())
+        mapped = set(_TOOL_AGENT_MAP.keys()) | _BUILTIN_TOOLS
         orphaned = tool_names - mapped
         assert not orphaned, (
             f"CRUZ_TOOLS advertises tools with no dispatcher in "
@@ -47,7 +55,12 @@ class TestCruzToolRegistryConsistency:
             )
 
     def test_tool_definitions_have_required_fields(self):
-        """Each CRUZ_TOOLS entry must have name, description, input_schema.task."""
+        """Each CRUZ_TOOLS entry must have name, description, input_schema.
+
+        Delegated tools (those routed via _TOOL_AGENT_MAP) must additionally
+        expose a `task` property — CruzAgent._dispatch_tool reads it. Built-in
+        tools handled inline by CruzAgent may declare their own schema.
+        """
         for tool in CRUZ_TOOLS:
             assert "name" in tool, f"tool missing name: {tool}"
             assert "description" in tool, f"tool missing description: {tool['name']}"
@@ -56,6 +69,8 @@ class TestCruzToolRegistryConsistency:
             assert schema.get("type") == "object", (
                 f"{tool['name']}.input_schema.type must be 'object'"
             )
+            if tool["name"] in _BUILTIN_TOOLS:
+                continue
             props = schema.get("properties", {})
             assert "task" in props, (
                 f"{tool['name']}.input_schema.properties.task missing — "
@@ -63,8 +78,9 @@ class TestCruzToolRegistryConsistency:
             )
 
     def test_tool_count_matches_agent_count(self):
-        """Simple quantitative guard — both maps should have the same size."""
-        assert len(CRUZ_TOOLS) == len(_TOOL_AGENT_MAP), (
-            f"CRUZ_TOOLS has {len(CRUZ_TOOLS)} entries but _TOOL_AGENT_MAP "
-            f"has {len(_TOOL_AGENT_MAP)} — they must be kept in sync."
+        """Simple quantitative guard — delegated tools must mirror _TOOL_AGENT_MAP."""
+        delegated = [t for t in CRUZ_TOOLS if t["name"] not in _BUILTIN_TOOLS]
+        assert len(delegated) == len(_TOOL_AGENT_MAP), (
+            f"CRUZ_TOOLS has {len(delegated)} delegated entries but "
+            f"_TOOL_AGENT_MAP has {len(_TOOL_AGENT_MAP)} — they must be kept in sync."
         )

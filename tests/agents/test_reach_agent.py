@@ -48,6 +48,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all REACH tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.reach.reach_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -762,3 +777,31 @@ class TestReachSendMode:
             result = await agent.process(_make_input())
         assert result["requires_approval"] is True
         email_cls.assert_not_called()
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestReachKnowledgeBase:
+    async def test_reach_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        agent = ReachAgent()
+        with patch("agents.reach.reach_agent.httpx.AsyncClient") as cls, \
+             patch("agents.reach.reach_agent.OllamaService") as ollama_cls, \
+             patch("agents.reach.reach_agent.get_db_service"):
+            _setup_gemini_mock(cls, _leads_json())
+            _setup_ollama_mock(ollama_cls, _outreach_json())
+            await agent.process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_reach_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert ReachAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_domain_knowledge",
+        ]

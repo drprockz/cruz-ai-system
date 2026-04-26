@@ -190,3 +190,56 @@ class TestBuildAgentContext:
         kb._qdrant.search = AsyncMock(side_effect=Exception("qdrant down"))
         ctx = await kb.build_agent_context("task", ["cruz_activities"], "t1")
         assert ctx == ""
+
+
+class TestWriteProjectDoc:
+    @pytest.fixture
+    def kb(self):
+        return KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+
+    @pytest.mark.asyncio
+    async def test_calls_upsert_with_expected_payload(self, kb):
+        await kb.write_project_doc(
+            "proj-1", "AMA Solutions", "Stack: React 18", "readme",
+            file_path="README.md", chunk_index=0
+        )
+        kb._qdrant.upsert.assert_awaited_once()
+        payload = kb._qdrant.upsert.call_args.kwargs["payload"]
+        assert payload["project_id"] == "proj-1"
+        assert payload["project_name"] == "AMA Solutions"
+        assert payload["doc_type"] == "readme"
+        assert payload["file_path"] == "README.md"
+
+    @pytest.mark.asyncio
+    async def test_point_id_is_deterministic(self, kb):
+        await kb.write_project_doc("p", "Name", "content", "note", chunk_index=0)
+        id1 = kb._qdrant.upsert.call_args.kwargs["id"]
+        kb._qdrant.upsert.reset_mock()
+        await kb.write_project_doc("p", "Name", "content", "note", chunk_index=0)
+        id2 = kb._qdrant.upsert.call_args.kwargs["id"]
+        assert id1 == id2
+
+    @pytest.mark.asyncio
+    async def test_does_not_raise_on_qdrant_error(self, kb):
+        kb._qdrant.upsert = AsyncMock(side_effect=Exception("fail"))
+        await kb.write_project_doc("p", "N", "c", "note")
+
+
+class TestWriteDomainKnowledge:
+    @pytest.fixture
+    def kb(self):
+        return KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+
+    @pytest.mark.asyncio
+    async def test_writes_to_domain_collection(self, kb):
+        await kb.write_domain_knowledge("Next.js tip", "Next.js App Router")
+        kb._qdrant.ensure_collection.assert_awaited_with("cruz_domain_knowledge", 384)
+        payload = kb._qdrant.upsert.call_args.kwargs["payload"]
+        assert payload["topic"] == "Next.js App Router"
+        assert payload["source"] == "raw_agent"
+
+    @pytest.mark.asyncio
+    async def test_accepts_manual_source(self, kb):
+        await kb.write_domain_knowledge("note", "topic", source="manual")
+        payload = kb._qdrant.upsert.call_args.kwargs["payload"]
+        assert payload["source"] == "manual"

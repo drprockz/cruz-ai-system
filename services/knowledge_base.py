@@ -194,7 +194,30 @@ class KnowledgeBaseService:
         Upsert a project knowledge chunk.
         Point ID = sha256(project_id + file_path + str(chunk_index))[:32]
         """
-        raise NotImplementedError
+        try:
+            vector = self._embedding.encode(content)
+            point_id = self._point_id(
+                project_id, file_path or "", str(chunk_index)
+            )
+            payload: Dict[str, Any] = {
+                "project_id":   project_id,
+                "project_name": project_name,
+                "doc_type":     doc_type,
+                "file_path":    file_path,
+                "content":      content,
+                "timestamp":    time.time(),
+            }
+            await self._qdrant.ensure_collection(
+                self.COLLECTION_PROJECTS_DOCS, self.VECTOR_SIZE
+            )
+            await self._qdrant.upsert(
+                collection=self.COLLECTION_PROJECTS_DOCS,
+                id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("write_project_doc failed (non-fatal): %s", exc)
 
     # ── WRITE — user patterns (explicit) ─────────────────────────────
 
@@ -232,7 +255,26 @@ class KnowledgeBaseService:
         trace_id: Optional[str] = None,
     ) -> None:
         """Upsert a domain knowledge chunk into cruz_domain_knowledge."""
-        raise NotImplementedError
+        try:
+            vector = self._embedding.encode(content)
+            point_id = self._point_id(topic, content[:50])
+            payload: Dict[str, Any] = {
+                "topic":     topic,
+                "content":   content,
+                "source":    source,
+                "timestamp": time.time(),
+            }
+            await self._qdrant.ensure_collection(
+                self.COLLECTION_DOMAIN, self.VECTOR_SIZE
+            )
+            await self._qdrant.upsert(
+                collection=self.COLLECTION_DOMAIN,
+                id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("write_domain_knowledge failed (non-fatal): %s", exc)
 
     # ── Internal helpers ──────────────────────────────────────────────
 

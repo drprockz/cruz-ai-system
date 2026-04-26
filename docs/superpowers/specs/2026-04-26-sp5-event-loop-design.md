@@ -23,6 +23,7 @@
 - `services/agent_state.py` — `StateService` over new Postgres `agent_state` table
 - `agents/event_driven_agent.py` — `EventDrivenAgent(BaseAgent)` base with `KNOWLEDGE_RINGS`, `TRIGGERS`, `CRITICAL_REASONS` declarations + `emit()` helper
 - Alembic migration `0005_agent_state` — new Postgres table (Charter override under Rule 8)
+- Alembic migration `0006_projects_add_email_domains` — adds nullable `email_domains TEXT[]` column to existing `projects` table (used by Reply Triage `client_match`)
 - Webhook engine extension: `workers/tasks/webhook_tasks.py` extended to dispatch to registered event-driven agents (currently logs only)
 - Six new agents in `agents/<name>/`:
   - `reply_triage`, `followup`, `meeting_prep`, `funded_watcher`, `warm_network`, `health_guardian`
@@ -203,10 +204,11 @@ class GateRequest:
     payload: dict                # for the notification
 
 class ProactiveEngine:
-    GLOBAL_DAILY_RATE_LIMIT = 8           # max non-info pings/day across all agents
-    PER_AGENT_COOLDOWN_ANY  = 3600        # 1h between any pings from same agent
-    PER_AGENT_COOLDOWN_CRIT = 86400       # 24h between criticals from same agent
-    DEDUP_WINDOW            = 86400 * 7   # 7d dedup on (agent, key)
+    GLOBAL_DAILY_RATE_LIMIT   = 8         # max non-info pings/day across all agents
+    PER_AGENT_INFO_DAILY_CAP  = 20        # max info pings/day per agent (safety cap)
+    PER_AGENT_COOLDOWN_ANY    = 3600      # 1h between any pings from same agent
+    PER_AGENT_COOLDOWN_CRIT   = 86400     # 24h between criticals from same agent
+    DEDUP_WINDOW              = 86400 * 7 # 7d dedup on (agent, key)
 
     async def allow(self, req: GateRequest) -> GateDecision: ...
 ```
@@ -219,9 +221,10 @@ class ProactiveEngine:
 3. If `severity == "critical"`:
    - Read `_gate.cooldown:<agent>:critical`. If within `PER_AGENT_COOLDOWN_CRIT` → **SUPPRESS**.
 4. Read `_gate.cooldown:<agent>:any`. If within `PER_AGENT_COOLDOWN_ANY`:
-   - If `severity == "info"` → **ALLOW** (info isn't rate-limited at agent level).
+   - If `severity == "info"` → **ALLOW** (info isn't rate-limited at agent level — but is still subject to step 2 dedup and step 4a below).
    - Else → **DEMOTE_TO_INFO**.
-5. Read `_global.daily_count:<YYYY-MM-DD>`. If `>= GLOBAL_DAILY_RATE_LIMIT` AND `severity != "info"` → **SUPPRESS** (`info` still routed; high-frequency `info` is collapsed by Daily Briefing).
+   - **4a (info safety cap):** if `severity == "info"` AND `_global.info_count_per_agent:<agent>:<YYYY-MM-DD>` ≥ `PER_AGENT_INFO_DAILY_CAP` (default 20) → **SUPPRESS**. This prevents a misbehaving agent from spamming the silent feed faster than Daily Briefing can collapse. Cap breach also raises a `degraded` flag on the agent in `/agents/status` (per Rule 6 soft-signal pattern).
+5. Read `_global.daily_count:<YYYY-MM-DD>`. If `>= GLOBAL_DAILY_RATE_LIMIT` AND `severity != "info"` → **SUPPRESS** (`info` still routed up to the per-agent cap from 4a; high-frequency `info` is collapsed by Daily Briefing).
 6. Otherwise → **ALLOW**.
 
 On `ALLOW` (or any DEMOTE that still routes), update:
@@ -414,7 +417,7 @@ class ReplyTriageAgent(EventDrivenAgent):
     "reason": "<short explanation>"
   }
   ```
-- **`client_match` resolution:** sender's email domain matched against `projects` table seeded by SP2 (e.g., `@ama.com` → `slug="ama-solutions"`). The activity record gets `project_id` for KB linkage.
+- **`client_match` resolution:** sender's email domain matched against the `projects` table that SP2 ships pre-seeded with the 5 known projects (verified: `docs/superpowers/specs/2026-04-26-sp2-knowledge-base-design.md` §3.2 lines 176–180 — `INSERT INTO projects` runs on Alembic migration; `scripts/seed_kb.py` exists). Reply Triage uses `slug` matching plus a configurable `email_domain` field added to the `projects` table via a tiny SP5 migration extension (`0006_projects_add_email_domains`) — one new nullable column, no schema rewrite. The activity record gets `project_id` for KB linkage.
 - **Critical fires only when ALL hold:**
   - `label == "needs_reply"`
   - `urgency in {"now", "today"}`
@@ -521,7 +524,9 @@ Each handler is a scheduled-prompt + Claude/Ollama call with no tool-use loop an
 async def handle(payload: dict, context: HandlerContext) -> HandlerResult: ...
 ```
 
-`HandlerContext` provides `kb`, `db`, `trace_id`, `now`. Handlers can call `kb.build_agent_context()` (per Rule 3) but cannot be invoked as CRUZ tools (per Rule 7). All handlers route through the gate at `info` severity only — they cannot bypass to `warn`/`critical`.
+`HandlerContext` provides `kb`, `db`, `trace_id`, `now`, and a constrained `emit_info(reason: str, dedup_key: str, payload: dict)` method. Handlers can call `kb.build_agent_context()` (per Rule 3) but cannot be invoked as CRUZ tools (per Rule 7).
+
+**Structural info-only enforcement.** `HandlerContext` deliberately exposes only `emit_info()` — there is no `emit_warn` or `emit_critical` method on the context. The full `emit(severity, ...)` method exists only on `EventDrivenAgent`. This makes "handlers cannot fire warn/critical" a type-system fact, not a code-review convention. A handler that needs `warn`/`critical` semantics is by definition not a handler — it should be promoted to an event-driven agent and re-checked against Rule 1.
 
 | Handler | Schedule | Inputs | Output | Rule 1 score |
 |---|---|---|---|---|
@@ -602,6 +607,8 @@ Days 8–14 of SP5 execution (after agents have a week of warmup data in `agent_
 - **Pass criteria (all must hold):**
   - Every day in window has `count(severity in {info, warn, critical}) >= 3`.
   - `count(false_critical_acks during window) == 0`.
+
+- **What counts as a "false-critical" for the exit gate:** only **delivered** critical notifications that the user explicitly marks `❌ False alarm` via the Telegram inline button. A `gate_decision == DEMOTE_TO_WARN` event (the gate prevented an unauthorized critical from firing) does **not** count — the gate working correctly is success, not failure. `DEMOTE_TO_WARN` events are still logged for observability and surface in the Daily Briefing as a "gate prevented X critical attempts today" line, so misbehaving agents are visible without breaking the gate.
 - **Failure modes:**
   - Any single day with a false-critical ack → window resets from that day.
   - Any single day with `<3` pings → window resets.
@@ -685,7 +692,7 @@ See §3.1 above for the full block. Summary: `agent_state` is mutable per-agent 
 
 This section is a sequence sketch only. The detailed implementation plan is produced by `superpowers:writing-plans` after this spec is approved.
 
-1. Migration `0005_agent_state` + `services/agent_state.py` + tests.
+1. Migrations `0005_agent_state` + `0006_projects_add_email_domains` + `services/agent_state.py` + tests.
 2. `services/proactive_engine.py` + tests (gate decision matrix).
 3. `services/notification_router.py` + `TelegramChannel` + tests.
 4. `agents/event_driven_agent.py` + tests.

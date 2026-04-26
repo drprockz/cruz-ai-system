@@ -90,7 +90,56 @@ class KnowledgeBaseService:
         limit_per_ring: int = 5,
     ) -> str:
         """Return a formatted context string for injection into the agent's system prompt."""
-        raise NotImplementedError
+        try:
+            query_vector = self._embedding.encode(task)
+            sections: List[str] = []
+
+            for ring in rings:
+                try:
+                    hits = await self._qdrant.search(
+                        collection=ring,
+                        query_vector=query_vector,
+                        limit=limit_per_ring,
+                    )
+                except Exception:
+                    continue
+
+                if not hits:
+                    continue
+
+                if ring == self.COLLECTION_ACTIVITIES:
+                    lines = []
+                    for h in hits:
+                        p = h["payload"]
+                        age = int((time.time() - p.get("timestamp", time.time())) / 3600)
+                        age_str = f"{age}h ago" if age < 48 else f"{age // 24}d ago"
+                        lines.append(
+                            f"- {p.get('agent_name','?')}: {p.get('task','')} "
+                            f"({age_str})"
+                        )
+                    sections.append(f"{self.HEADER_ACTIVITIES}\n" + "\n".join(lines))
+
+                elif ring == self.COLLECTION_PROJECTS_DOCS:
+                    proj_name = hits[0]["payload"].get("project_name", "")
+                    header = f"{self.HEADER_PROJECTS}"
+                    if proj_name:
+                        header += f" — {proj_name}"
+                    lines = [h["payload"].get("content", "") for h in hits]
+                    sections.append(header + "\n" + "\n".join(lines))
+
+                elif ring == self.COLLECTION_USER_PATTERNS:
+                    lines = ["- " + h["payload"].get("content", "") for h in hits]
+                    sections.append(f"{self.HEADER_PATTERNS}\n" + "\n".join(lines))
+
+                elif ring == self.COLLECTION_DOMAIN:
+                    lines = [h["payload"].get("content", "") for h in hits]
+                    sections.append(f"{self.HEADER_DOMAIN}\n" + "\n".join(lines))
+
+            return "\n\n".join(sections)
+
+        except Exception as exc:
+            logger.warning("[%s] build_agent_context failed (non-fatal): %s", trace_id, exc)
+            return ""
 
     # ── WRITE — activities ────────────────────────────────────────────
 

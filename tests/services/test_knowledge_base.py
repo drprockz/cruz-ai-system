@@ -121,3 +121,72 @@ class TestRecordAgentActivity:
         kb._qdrant.upsert = AsyncMock(side_effect=Exception("qdrant down"))
         # Must not propagate — recording is fire-and-forget
         await kb.record_agent_activity("forge", "task", "result", True, "trace-4")
+
+
+class TestBuildAgentContext:
+    def _make_kb_with_hits(self, hits_by_collection: dict):
+        qdrant = _make_qdrant()
+        async def _search(collection, query_vector, limit=5):
+            return hits_by_collection.get(collection, [])
+        qdrant.search = _search
+        return KnowledgeBaseService(qdrant, _make_embedding(), _make_db())
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_string_when_all_rings_empty(self):
+        kb = KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+        ctx = await kb.build_agent_context("some task", ["cruz_activities"], "t1")
+        assert ctx == ""
+
+    @pytest.mark.asyncio
+    async def test_only_queries_declared_rings(self):
+        kb = KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+        await kb.build_agent_context("task", ["cruz_activities"], "t1")
+        # search called once (for activities), not 4 times
+        assert kb._qdrant.search.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_activities_section_included_when_hits_exist(self):
+        import time
+        hits = [{"score": 0.9, "payload": {
+            "agent_name": "forge", "task": "wrote foo()",
+            "result_summary": "added function", "timestamp": time.time() - 3600
+        }}]
+        kb = self._make_kb_with_hits({"cruz_activities": hits})
+        ctx = await kb.build_agent_context("task", ["cruz_activities"], "t1")
+        assert KnowledgeBaseService.HEADER_ACTIVITIES in ctx
+        assert "forge" in ctx
+
+    @pytest.mark.asyncio
+    async def test_projects_section_included_when_hits_exist(self):
+        hits = [{"score": 0.85, "payload": {
+            "project_name": "AMA Solutions",
+            "content": "Stack: React 18, PostgreSQL",
+            "doc_type": "readme"
+        }}]
+        kb = self._make_kb_with_hits({"cruz_projects_docs": hits})
+        ctx = await kb.build_agent_context(
+            "task", ["cruz_projects_docs"], "t1", project_id="proj-1"
+        )
+        assert KnowledgeBaseService.HEADER_PROJECTS in ctx
+        assert "AMA Solutions" in ctx
+
+    @pytest.mark.asyncio
+    async def test_empty_rings_omit_section_headers(self):
+        import time
+        hits = [{"score": 0.9, "payload": {
+            "agent_name": "forge", "task": "t", "result_summary": "r",
+            "timestamp": time.time()
+        }}]
+        kb = self._make_kb_with_hits({"cruz_activities": hits})
+        ctx = await kb.build_agent_context(
+            "task", ["cruz_activities", "cruz_user_patterns"], "t1"
+        )
+        assert KnowledgeBaseService.HEADER_ACTIVITIES in ctx
+        assert KnowledgeBaseService.HEADER_PATTERNS not in ctx
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_string_on_qdrant_error(self):
+        kb = KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+        kb._qdrant.search = AsyncMock(side_effect=Exception("qdrant down"))
+        ctx = await kb.build_agent_context("task", ["cruz_activities"], "t1")
+        assert ctx == ""

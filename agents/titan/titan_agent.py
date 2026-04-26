@@ -27,6 +27,7 @@ import httpx
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.alerts import get_alert_service
 from services.db import get_db_service
+from services.knowledge_base import get_kb_service
 
 logger = logging.getLogger("cruz.agents.TITAN")
 
@@ -43,6 +44,11 @@ class TitanAgent(BaseAgent):
     operator confirms before the deployment is treated as authorised.
     """
 
+    KNOWLEDGE_RINGS: list[str] = [
+        "cruz_activities",
+        "cruz_projects_docs",
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "TITAN"
@@ -52,158 +58,191 @@ class TitanAgent(BaseAgent):
         db = get_db_service()
         target = input["context"].get("target", "")
         project = input["context"].get("project", "")
+        output: Optional[AgentOutput] = None
 
-        # ── QT gate ──────────────────────────────────────────────────────
-        if not input["context"].get("qt_passed", False):
-            err = "QT gate not passed — all tests must pass before deploying."
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"target": target, "project": project},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
-            )
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        # TITAN has no LLM call to inject into, but recording activity is
+        # still meaningful for telemetry; the read warms past-deploy context.
+        kb = get_kb_service()
+        await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
-        # ── Unknown target — refuse immediately, no rollback ─────────────
-        if target not in ("vercel", "railway", "ssh"):
-            err = f"Unknown deploy target '{target}'. Supported: vercel, railway, ssh."
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"target": target, "project": project},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
-            )
-
-        # ── Dispatch to target ────────────────────────────────────────────
-        deploy_result: Dict[str, Any] = {}
-        deploy_ok = False
-        deploy_error: Optional[str] = None
         try:
-            if target == "vercel":
-                deploy_result, deploy_ok = await self._deploy_vercel(input["context"])
-            elif target == "railway":
-                deploy_result, deploy_ok = await self._deploy_railway(input["context"])
-            else:  # ssh
-                deploy_result, deploy_ok = await self._deploy_ssh(input["context"])
-        except Exception as exc:
-            deploy_error = str(exc)
-            deploy_result = {
-                "target": target,
-                "project": project,
-                "error": deploy_error,
-            }
+            # ── QT gate ──────────────────────────────────────────────────────
+            if not input["context"].get("qt_passed", False):
+                err = "QT gate not passed — all tests must pass before deploying."
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"target": target, "project": project},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
 
-        # ── Deploy failed → attempt rollback ──────────────────────────────
-        if not deploy_ok:
-            auto_rollback = input["context"].get("auto_rollback", True)
-            if not auto_rollback:
-                deploy_result["rolled_back"] = False
-                deploy_result["rollback_skipped_reason"] = "auto_rollback disabled"
-            else:
-                rb = await self._rollback(target, input["context"])
-                deploy_result.update(rb)
+            # ── Unknown target — refuse immediately, no rollback ─────────────
+            if target not in ("vercel", "railway", "ssh"):
+                err = f"Unknown deploy target '{target}'. Supported: vercel, railway, ssh."
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"target": target, "project": project},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
 
-            err_msg = deploy_error or "Deploy reported failure"
+            # ── Dispatch to target ────────────────────────────────────────────
+            deploy_result: Dict[str, Any] = {}
+            deploy_ok = False
+            deploy_error: Optional[str] = None
+            try:
+                if target == "vercel":
+                    deploy_result, deploy_ok = await self._deploy_vercel(input["context"])
+                elif target == "railway":
+                    deploy_result, deploy_ok = await self._deploy_railway(input["context"])
+                else:  # ssh
+                    deploy_result, deploy_ok = await self._deploy_ssh(input["context"])
+            except Exception as exc:
+                deploy_error = str(exc)
+                deploy_result = {
+                    "target": target,
+                    "project": project,
+                    "error": deploy_error,
+                }
+
+            # ── Deploy failed → attempt rollback ──────────────────────────────
+            if not deploy_ok:
+                auto_rollback = input["context"].get("auto_rollback", True)
+                if not auto_rollback:
+                    deploy_result["rolled_back"] = False
+                    deploy_result["rollback_skipped_reason"] = "auto_rollback disabled"
+                else:
+                    rb = await self._rollback(target, input["context"])
+                    deploy_result.update(rb)
+
+                err_msg = deploy_error or "Deploy reported failure"
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await get_alert_service().notify(
+                        "critical",
+                        f"TITAN deploy failed ({target}/{project})",
+                        f"error={err_msg} rolled_back={deploy_result.get('rolled_back', False)} trace_id={input['trace_id']}",
+                    )
+                except Exception:
+                    pass
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"target": target, "project": project},
+                        output_data={
+                            "error": err_msg,
+                            "rolled_back": deploy_result.get("rolled_back", False),
+                        },
+                        tokens_used=0,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=deploy_result,
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=0,
+                    error=err_msg,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Deploy succeeded → approval gate (existing behavior) ─────────
+            deploy_result["rolled_back"] = False
+            approval_prompt = (
+                f"Deploy {project} to {target}?\n"
+                f"  Deployment ID: {deploy_result.get('deployment_id', 'N/A')}\n"
+                f"  URL: {deploy_result.get('url', 'N/A')}\n"
+                f"  QT: passed ✓\n\n"
+                f"Reply 'yes' to confirm or 'no' to rollback."
+            )
+
             duration = int((time.monotonic() - start) * 1000)
             try:
-                await get_alert_service().notify(
-                    "critical",
-                    f"TITAN deploy failed ({target}/{project})",
-                    f"error={err_msg} rolled_back={deploy_result.get('rolled_back', False)} trace_id={input['trace_id']}",
-                )
-            except Exception:
-                pass
-            try:
                 await self.log(
                     db=db,
                     trace_id=input["trace_id"],
-                    status="error",
+                    status="success",
                     input_data={"target": target, "project": project},
-                    output_data={
-                        "error": err_msg,
-                        "rolled_back": deploy_result.get("rolled_back", False),
-                    },
+                    output_data=deploy_result,
                     tokens_used=0,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
-            return AgentOutput(
-                success=False,
+
+            output = AgentOutput(
+                success=True,
                 result=deploy_result,
                 agent=self.name,
                 duration_ms=duration,
                 tokens_used=0,
-                error=err_msg,
-                requires_approval=False,
-                approval_prompt=None,
+                error=None,
+                requires_approval=True,
+                approval_prompt=approval_prompt,
             )
+            return output
 
-        # ── Deploy succeeded → approval gate (existing behavior) ─────────
-        deploy_result["rolled_back"] = False
-        approval_prompt = (
-            f"Deploy {project} to {target}?\n"
-            f"  Deployment ID: {deploy_result.get('deployment_id', 'N/A')}\n"
-            f"  URL: {deploy_result.get('url', 'N/A')}\n"
-            f"  QT: passed ✓\n\n"
-            f"Reply 'yes' to confirm or 'no' to rollback."
-        )
-
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"target": target, "project": project},
-                output_data=deploy_result,
-                tokens_used=0,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=True,
-            result=deploy_result,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=0,
-            error=None,
-            requires_approval=True,
-            approval_prompt=approval_prompt,
-        )
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "titan",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     # ── Deploy targets ────────────────────────────────────────────────────
 

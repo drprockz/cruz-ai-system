@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # Make project root importable so agents/ and services/ can be resolved
@@ -1116,6 +1117,20 @@ async def deny_approval(approval_id: str) -> JSONResponse:
     """
     result = await _respond_to_approval(approval_id, "denied")
     return JSONResponse(status_code=200, content=result)
+
+
+# ── SPA mount (must be the LAST route registered so it doesn't shadow API routes) ──
+# Serves the built React PWA from frontend/dist. Frontend production build uses
+# VITE_API_BASE="" so it calls API routes on the same origin (e.g. /command).
+# This collapses the previously-separate cruz-ui PM2 app onto port 3000, which
+# means a single Cloudflare Tunnel ingress rule serves both UI and API.
+_FRONTEND_DIST = os.path.join(_PROJECT_ROOT, "frontend", "dist")
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount(
+        "/",
+        StaticFiles(directory=_FRONTEND_DIST, html=True),
+        name="frontend",
+    )
 
 
 if __name__ == "__main__":

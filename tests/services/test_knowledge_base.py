@@ -76,3 +76,48 @@ class TestKnowledgeBaseServiceInterface:
                 svc1 = get_kb_service()
                 svc2 = get_kb_service()
                 assert svc1 is svc2
+
+
+class TestRecordAgentActivity:
+    @pytest.fixture
+    def kb(self):
+        return KnowledgeBaseService(_make_qdrant(), _make_embedding(), _make_db())
+
+    @pytest.mark.asyncio
+    async def test_calls_qdrant_upsert(self, kb):
+        await kb.record_agent_activity(
+            "forge", "write a function", "wrote foo()", True, "trace-1"
+        )
+        kb._qdrant.ensure_collection.assert_awaited_once_with(
+            "cruz_activities", 384
+        )
+        kb._qdrant.upsert.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_embed_text_contains_agent_and_task(self, kb):
+        await kb.record_agent_activity(
+            "echo", "draft email", "drafted subject line", True, "trace-2"
+        )
+        call_args = kb._embedding.encode.call_args[0][0]
+        assert "echo" in call_args
+        assert "draft email" in call_args
+
+    @pytest.mark.asyncio
+    async def test_payload_fields_present(self, kb):
+        await kb.record_agent_activity(
+            "forge", "task", "result", False, "trace-3",
+            project_id="proj-1", tokens_used=100
+        )
+        payload = kb._qdrant.upsert.call_args.kwargs["payload"]
+        assert payload["agent_name"] == "forge"
+        assert payload["success"] is False
+        assert payload["project_id"] == "proj-1"
+        assert payload["tokens_used"] == 100
+        assert payload["trace_id"] == "trace-3"
+        assert "timestamp" in payload
+
+    @pytest.mark.asyncio
+    async def test_does_not_raise_when_qdrant_fails(self, kb):
+        kb._qdrant.upsert = AsyncMock(side_effect=Exception("qdrant down"))
+        # Must not propagate — recording is fire-and-forget
+        await kb.record_agent_activity("forge", "task", "result", True, "trace-4")

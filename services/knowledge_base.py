@@ -105,7 +105,29 @@ class KnowledgeBaseService:
         tokens_used: Optional[int] = None,
     ) -> None:
         """Embed and upsert one activity record into cruz_activities."""
-        raise NotImplementedError
+        try:
+            embed_text = f"agent {agent_name}: {task} → {result_summary}"
+            vector = self._embedding.encode(embed_text)
+            point_id = self._point_id(trace_id, agent_name, str(time.time()))
+            payload: Dict[str, Any] = {
+                "agent_name":     agent_name,
+                "task":           task,
+                "result_summary": result_summary,
+                "success":        success,
+                "project_id":     project_id,
+                "trace_id":       trace_id,
+                "timestamp":      time.time(),
+                "tokens_used":    tokens_used,
+            }
+            await self._qdrant.ensure_collection(self.COLLECTION_ACTIVITIES, self.VECTOR_SIZE)
+            await self._qdrant.upsert(
+                collection=self.COLLECTION_ACTIVITIES,
+                id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("[%s] record_agent_activity failed (non-fatal): %s", trace_id, exc)
 
     # ── WRITE — project docs ──────────────────────────────────────────
 

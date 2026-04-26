@@ -36,6 +36,21 @@ from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all MARK tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.mark.mark_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -606,3 +621,30 @@ class TestMarkPublishMode:
         assert result["requires_approval"] is True
         gh_cls.assert_not_called()
         nt_cls.assert_not_called()
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+from agents.mark.mark_agent import MarkAgent  # noqa: E402
+
+
+@pytest.mark.asyncio
+class TestMarkKnowledgeBase:
+    async def test_mark_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        with patch("agents.mark.mark_agent.OllamaService", return_value=_mock_ollama()), \
+             patch("agents.mark.mark_agent.get_db_service"):
+            await MarkAgent().process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_mark_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert MarkAgent.KNOWLEDGE_RINGS == [
+            "cruz_activities",
+            "cruz_projects_docs",
+        ]

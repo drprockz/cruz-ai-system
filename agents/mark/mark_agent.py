@@ -32,6 +32,7 @@ import anthropic
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
 from services.github import GitHubService
+from services.knowledge_base import get_kb_service
 from services.notion import NotionService
 from services.ollama import OllamaService
 
@@ -83,6 +84,11 @@ class MarkAgent(BaseAgent):
     to GitHub or Notion is an external, visible action.
     """
 
+    KNOWLEDGE_RINGS: list[str] = [
+        "cruz_activities",
+        "cruz_projects_docs",
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "MARK"
@@ -92,191 +98,224 @@ class MarkAgent(BaseAgent):
         db = get_db_service()
         doc_type = input["context"].get("doc_type", "")
         project = input["context"].get("project", "")
+        output: Optional[AgentOutput] = None
 
-        # ── Validate doc_type ─────────────────────────────────────────────
-        if doc_type not in _SUPPORTED_TYPES:
-            err = (
-                f"Unknown doc_type '{doc_type}'. "
-                f"Supported: {', '.join(sorted(_SUPPORTED_TYPES))}."
-            )
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"doc_type": doc_type, "project": project},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
-            )
+        # ── KB context (fire-and-forget; never raises) ───────────────────
+        kb = get_kb_service()
+        kb_context = await kb.build_agent_context(
+            input["task"],
+            self.KNOWLEDGE_RINGS,
+            input["trace_id"],
+            project_id=input["context"].get("project_id"),
+        )
 
-        # ── Build prompt ──────────────────────────────────────────────────
-        prompt = _build_prompt(doc_type, input)
-
-        # ── Generate docs ─────────────────────────────────────────────────
         try:
-            content, tokens_used = await self._generate(prompt, input["trace_id"])
-        except Exception as exc:
-            err = str(exc)
-            duration = int((time.monotonic() - start) * 1000)
-            try:
-                await self.log(
-                    db=db,
-                    trace_id=input["trace_id"],
-                    status="error",
-                    input_data={"doc_type": doc_type, "project": project},
-                    output_data={"error": err},
-                    tokens_used=0,
-                    duration_ms=duration,
+            # ── Validate doc_type ─────────────────────────────────────────────
+            if doc_type not in _SUPPORTED_TYPES:
+                err = (
+                    f"Unknown doc_type '{doc_type}'. "
+                    f"Supported: {', '.join(sorted(_SUPPORTED_TYPES))}."
                 )
-            except Exception:
-                pass
-            return AgentOutput(
-                success=False,
-                result=None,
-                agent=self.name,
-                duration_ms=duration,
-                tokens_used=0,
-                error=err,
-                requires_approval=False,
-                approval_prompt=None,
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"doc_type": doc_type, "project": project},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Build prompt ──────────────────────────────────────────────────
+            prompt = _build_prompt(doc_type, input)
+            if kb_context:
+                prompt = kb_context + "\n\n" + prompt
+
+            # ── Generate docs ─────────────────────────────────────────────────
+            try:
+                content, tokens_used = await self._generate(prompt, input["trace_id"])
+            except Exception as exc:
+                err = str(exc)
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="error",
+                        input_data={"doc_type": doc_type, "project": project},
+                        output_data={"error": err},
+                        tokens_used=0,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+                output = AgentOutput(
+                    success=False,
+                    result=None,
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=0,
+                    error=err,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Build result ──────────────────────────────────────────────────
+            result: Dict[str, Any] = {
+                "doc_type": doc_type,
+                "content": content,
+                "project": project,
+            }
+
+            # ── Publish mode: context["send"]=True → push to GitHub / Notion ─
+            ctx = input["context"]
+            if ctx.get("send") is True:
+                target = ctx.get("target", "github")
+                published = {"github": False, "notion": False}
+
+                if target in ("github", "both"):
+                    try:
+                        owner, _, repo_name = (ctx.get("repo") or "").partition("/")
+                        gh_result = await GitHubService().create_or_update_file(
+                            owner=owner,
+                            repo=repo_name,
+                            path=ctx.get("path", ""),
+                            content=content,
+                            message=f"docs: MARK publish {doc_type} for {project}",
+                            branch=ctx.get("branch", "main"),
+                        )
+                        published["github"] = True
+                        result["github_url"] = gh_result.get("html_url", "")
+                        result["commit_sha"] = gh_result.get("commit_sha", "")
+                    except Exception as gh_exc:
+                        logger.warning(
+                            "[%s] MARK GitHub publish failed: %s",
+                            input["trace_id"], gh_exc,
+                        )
+                        result["github_error"] = str(gh_exc)
+
+                if target in ("notion", "both"):
+                    try:
+                        notion_result = await NotionService().create_page(
+                            parent_id=ctx.get("notion_parent_id", ""),
+                            title=f"{project} — {doc_type}",
+                            content=content,
+                        )
+                        published["notion"] = True
+                        result["notion_url"] = notion_result.get("url", "")
+                        result["notion_page_id"] = notion_result.get("page_id", "")
+                    except Exception as nt_exc:
+                        logger.warning(
+                            "[%s] MARK Notion publish failed: %s",
+                            input["trace_id"], nt_exc,
+                        )
+                        result["notion_error"] = str(nt_exc)
+
+                result["published"] = published
+                any_success = any(published.values())
+
+                duration = int((time.monotonic() - start) * 1000)
+                try:
+                    await self.log(
+                        db=db,
+                        trace_id=input["trace_id"],
+                        status="success" if any_success else "error",
+                        input_data={
+                            "doc_type": doc_type,
+                            "project": project,
+                            "target": target,
+                        },
+                        output_data={"published": published, "chars": len(content)},
+                        tokens_used=tokens_used,
+                        duration_ms=duration,
+                    )
+                except Exception:
+                    pass
+
+                error_msg = None
+                if not any_success:
+                    errs = []
+                    if result.get("github_error"):
+                        errs.append(f"GitHub: {result['github_error']}")
+                    if result.get("notion_error"):
+                        errs.append(f"Notion: {result['notion_error']}")
+                    error_msg = " | ".join(errs) or "Publish failed on all targets"
+
+                output = AgentOutput(
+                    success=any_success,
+                    result=result,
+                    agent=self.name,
+                    duration_ms=duration,
+                    tokens_used=tokens_used,
+                    error=error_msg,
+                    requires_approval=False,
+                    approval_prompt=None,
+                )
+                return output
+
+            # ── Draft-only (default): approval gate ──────────────────────────
+            approval_prompt = (
+                f"Publish {doc_type} documentation for '{project}'?\n"
+                f"  Characters generated: {len(content)}\n\n"
+                f"Reply 'yes' to write to GitHub/Notion or 'no' to discard."
             )
 
-        # ── Build result ──────────────────────────────────────────────────
-        result: Dict[str, Any] = {
-            "doc_type": doc_type,
-            "content": content,
-            "project": project,
-        }
-
-        # ── Publish mode: context["send"]=True → push to GitHub / Notion ─
-        ctx = input["context"]
-        if ctx.get("send") is True:
-            target = ctx.get("target", "github")
-            published = {"github": False, "notion": False}
-
-            if target in ("github", "both"):
-                try:
-                    owner, _, repo_name = (ctx.get("repo") or "").partition("/")
-                    gh_result = await GitHubService().create_or_update_file(
-                        owner=owner,
-                        repo=repo_name,
-                        path=ctx.get("path", ""),
-                        content=content,
-                        message=f"docs: MARK publish {doc_type} for {project}",
-                        branch=ctx.get("branch", "main"),
-                    )
-                    published["github"] = True
-                    result["github_url"] = gh_result.get("html_url", "")
-                    result["commit_sha"] = gh_result.get("commit_sha", "")
-                except Exception as gh_exc:
-                    logger.warning(
-                        "[%s] MARK GitHub publish failed: %s",
-                        input["trace_id"], gh_exc,
-                    )
-                    result["github_error"] = str(gh_exc)
-
-            if target in ("notion", "both"):
-                try:
-                    notion_result = await NotionService().create_page(
-                        parent_id=ctx.get("notion_parent_id", ""),
-                        title=f"{project} — {doc_type}",
-                        content=content,
-                    )
-                    published["notion"] = True
-                    result["notion_url"] = notion_result.get("url", "")
-                    result["notion_page_id"] = notion_result.get("page_id", "")
-                except Exception as nt_exc:
-                    logger.warning(
-                        "[%s] MARK Notion publish failed: %s",
-                        input["trace_id"], nt_exc,
-                    )
-                    result["notion_error"] = str(nt_exc)
-
-            result["published"] = published
-            any_success = any(published.values())
-
             duration = int((time.monotonic() - start) * 1000)
             try:
                 await self.log(
                     db=db,
                     trace_id=input["trace_id"],
-                    status="success" if any_success else "error",
-                    input_data={
-                        "doc_type": doc_type,
-                        "project": project,
-                        "target": target,
-                    },
-                    output_data={"published": published, "chars": len(content)},
+                    status="success",
+                    input_data={"doc_type": doc_type, "project": project},
+                    output_data={"chars": len(content)},
                     tokens_used=tokens_used,
                     duration_ms=duration,
                 )
             except Exception:
                 pass
 
-            error_msg = None
-            if not any_success:
-                errs = []
-                if result.get("github_error"):
-                    errs.append(f"GitHub: {result['github_error']}")
-                if result.get("notion_error"):
-                    errs.append(f"Notion: {result['notion_error']}")
-                error_msg = " | ".join(errs) or "Publish failed on all targets"
-
-            return AgentOutput(
-                success=any_success,
+            output = AgentOutput(
+                success=True,
                 result=result,
                 agent=self.name,
                 duration_ms=duration,
                 tokens_used=tokens_used,
-                error=error_msg,
-                requires_approval=False,
-                approval_prompt=None,
+                error=None,
+                requires_approval=True,
+                approval_prompt=approval_prompt,
             )
+            return output
 
-        # ── Draft-only (default): approval gate ──────────────────────────
-        approval_prompt = (
-            f"Publish {doc_type} documentation for '{project}'?\n"
-            f"  Characters generated: {len(content)}\n\n"
-            f"Reply 'yes' to write to GitHub/Notion or 'no' to discard."
-        )
-
-        duration = int((time.monotonic() - start) * 1000)
-        try:
-            await self.log(
-                db=db,
-                trace_id=input["trace_id"],
-                status="success",
-                input_data={"doc_type": doc_type, "project": project},
-                output_data={"chars": len(content)},
-                tokens_used=tokens_used,
-                duration_ms=duration,
-            )
-        except Exception:
-            pass
-
-        return AgentOutput(
-            success=True,
-            result=result,
-            agent=self.name,
-            duration_ms=duration,
-            tokens_used=tokens_used,
-            error=None,
-            requires_approval=True,
-            approval_prompt=approval_prompt,
-        )
+        finally:
+            # ── KB activity record (fire-and-forget; never raises) ────────
+            try:
+                if output is not None:
+                    await kb.record_agent_activity(
+                        "mark",
+                        input["task"],
+                        str(output.get("result", ""))[:200],
+                        output["success"],
+                        input["trace_id"],
+                        project_id=input["context"].get("project_id"),
+                        tokens_used=output.get("tokens_used"),
+                    )
+            except Exception:
+                pass
 
     async def _generate(self, prompt: str, trace_id: str) -> Tuple[str, int]:
         """Generate documentation via Qwen (Ollama) with Claude Haiku fallback."""

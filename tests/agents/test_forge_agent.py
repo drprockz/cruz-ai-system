@@ -25,6 +25,21 @@ from agents.forge.forge_agent import ForgeAgent, FORGE_TOOLS
 
 
 # ─────────────────────────────────────────────
+# KB service mock — autouse, applies to every test in this module
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def mock_kb_service():
+    """Mock KnowledgeBaseService for all FORGE tests."""
+    mock_kb = MagicMock()
+    mock_kb.build_agent_context = AsyncMock(return_value="")
+    mock_kb.record_agent_activity = AsyncMock()
+    with patch("agents.forge.forge_agent.get_kb_service", return_value=mock_kb):
+        yield mock_kb
+
+
+# ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 
@@ -656,3 +671,25 @@ class TestForgeAgentLogging:
         assert result["success"] is False
         mock_log.assert_called()
         assert "error" in str(mock_log.call_args)
+
+
+# ─────────────────────────────────────────────
+# Knowledge Base integration
+# ─────────────────────────────────────────────
+
+
+class TestForgeKnowledgeBase:
+    async def test_forge_calls_kb_build_context(self, mock_kb_service):
+        """build_agent_context and record_agent_activity must each fire once per process()."""
+        client = _make_claude_client(_make_text_response("def hello(): pass"))
+        agent = ForgeAgent()
+
+        with patch("agents.forge.forge_agent.llm_chat", new=client.messages.create):
+            await agent.process(_make_input())
+
+        mock_kb_service.build_agent_context.assert_awaited_once()
+        mock_kb_service.record_agent_activity.assert_awaited_once()
+
+    def test_forge_declares_knowledge_rings(self):
+        """KNOWLEDGE_RINGS must be declared on the class."""
+        assert ForgeAgent.KNOWLEDGE_RINGS == ["cruz_activities", "cruz_projects_docs"]

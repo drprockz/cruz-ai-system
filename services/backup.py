@@ -1,5 +1,5 @@
 """
-BackupService — snapshots Postgres, Redis, Qdrant and uploads to Google Drive.
+BackupService — snapshots Postgres, Redis, Qdrant and writes them to a backup target.
 
 Run by workers/tasks/backup_tasks.py on a 4 AM daily ARQ cron.
 
@@ -7,14 +7,16 @@ Env vars:
   DATABASE_URL                     — parsed for pg_dump connection
   REDIS_URL                        — parsed for redis-cli connection (default: redis://localhost:6379)
   QDRANT_STORAGE_DIR               — on-disk path to qdrant_storage (default: ./qdrant_storage)
-  GOOGLE_DRIVE_FOLDER_ID           — destination folder (required for upload)
+  GOOGLE_DRIVE_FOLDER_ID           — destination folder (required for Drive upload)
   GOOGLE_APPLICATION_CREDENTIALS   — path to service-account JSON (Google auth)
+  BACKUP_LOCAL_DIR                 — if set, snapshots are moved here instead of uploaded to Drive
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tarfile
 import tempfile
 import time
@@ -36,6 +38,7 @@ class BackupService:
         qdrant_storage_dir: Optional[str] = None,
         drive_folder_id: Optional[str] = None,
         tmp_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
     ) -> None:
         self.database_url = database_url or os.environ.get(
             "DATABASE_URL",
@@ -50,6 +53,7 @@ class BackupService:
         self.drive_folder_id = drive_folder_id or os.environ.get(
             "GOOGLE_DRIVE_FOLDER_ID"
         )
+        self.local_dir = local_dir or os.environ.get("BACKUP_LOCAL_DIR")
         self.tmp_dir = tmp_dir or tempfile.gettempdir()
 
     async def snapshot_postgres(self) -> str:
@@ -123,6 +127,15 @@ class BackupService:
             creds_path, scopes=["https://www.googleapis.com/auth/drive.file"]
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    async def save_local(self, path: str) -> str:
+        """Move a snapshot file into BACKUP_LOCAL_DIR. Returns the destination path."""
+        if not self.local_dir:
+            raise RuntimeError("BACKUP_LOCAL_DIR not set")
+        os.makedirs(self.local_dir, exist_ok=True)
+        dest = os.path.join(self.local_dir, os.path.basename(path))
+        shutil.move(path, dest)
+        return dest
 
     async def upload_to_drive(self, path: str) -> str:
         """Upload a snapshot to Drive; return its webViewLink."""

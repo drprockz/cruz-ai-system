@@ -8,11 +8,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
+import urllib.parse
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from services.browser.errors import BrowserProfileError
+from services.browser.errors import BrowserError, BrowserProfileError
+from services.browser.parsers import (
+    PageResult,
+    SearchResult,
+    _parse_ddg_html,
+)
 
 logger = logging.getLogger("cruz.services.browser")
 
@@ -31,6 +38,10 @@ _PROFILE_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,32}$")
 _CHROMIUM_ARGS: list[str] = [
     "--disable-blink-features=AutomationControlled",
 ]
+
+# Pacing — overridden in tests via monkeypatch. Set BROWSER_PACE_DISABLED=1 in
+# the environment to skip the random pre-dispatch sleep.
+BROWSER_PACE_DISABLED: bool = bool(os.environ.get("BROWSER_PACE_DISABLED"))
 
 
 async def _async_playwright_start():
@@ -82,6 +93,39 @@ class BrowserService:
         self._contexts[profile] = ctx
         self._context_locks[profile] = asyncio.Lock()
         return ctx
+
+    async def _pace(self) -> None:
+        """Sleep a randomized delay before dispatching work."""
+        if BROWSER_PACE_DISABLED:
+            return
+        await asyncio.sleep(random.uniform(1.0, 3.0))
+
+    async def search(
+        self,
+        query: str,
+        *,
+        engine: str = "duckduckgo",
+        limit: int = 10,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> List[SearchResult]:
+        """Run a web search; return top-N results."""
+        if engine != "duckduckgo":
+            raise BrowserError(f"unsupported engine: {engine}")
+        await self._pace()
+        ctx = await self._get_context(profile)
+        page = await ctx.new_page()
+        try:
+            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            html = await page.content()
+            results = _parse_ddg_html(html)[:limit]
+            return results
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     async def health(self) -> dict:
         """Return a dict for /health: process alive + first-context CDP ping."""

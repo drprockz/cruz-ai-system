@@ -85,3 +85,60 @@ async def test_get_context_rejects_invalid_profile_name():
         await svc._get_context("../etc/passwd")
     with pytest.raises(BrowserProfileError):
         await svc._get_context("")
+
+
+# --- Task 2.1: search() + DDG parser ---------------------------------------
+from pathlib import Path
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_parse_ddg_html_returns_search_results():
+    from services.browser import _parse_ddg_html
+    html = (FIXTURE_DIR / "ddg_search_cruz_ai.html").read_text()
+    results = _parse_ddg_html(html)
+    assert len(results) >= 5
+    r0 = results[0]
+    assert set(r0.keys()) == {"title", "url", "snippet", "rank"}
+    assert r0["title"]
+    assert r0["url"].startswith("http")
+    assert r0["rank"] == 1
+
+
+def test_parse_ddg_html_empty_on_garbage():
+    from services.browser import _parse_ddg_html
+    assert _parse_ddg_html("<html><body>no results</body></html>") == []
+
+
+def test_parse_ddg_html_strips_redirector():
+    """DDG sometimes wraps result URLs in /l/?uddg=… — parser must unwrap."""
+    from services.browser import _parse_ddg_html
+    html = (FIXTURE_DIR / "ddg_search_cruz_ai.html").read_text()
+    results = _parse_ddg_html(html)
+    urls = [r["url"] for r in results]
+    # The fixture has one /l/?uddg=https%3A%2F%2Fanthropic.com%2Fclaude entry.
+    assert "https://anthropic.com/claude" in urls
+    # And no result URL should still contain the redirector.
+    assert not any("/l/?uddg=" in u for u in urls)
+
+
+@pytest.mark.asyncio
+async def test_search_returns_top_n(monkeypatch, tmp_path):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fixture_html = (FIXTURE_DIR / "ddg_search_cruz_ai.html").read_text()
+
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock()
+    fake_page.content = AsyncMock(return_value=fixture_html)
+    fake_page.url = "https://duckduckgo.com/html/?q=cruz+ai"
+    fake_page.close = AsyncMock()
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    results = await svc.search("cruz ai", limit=3, profile="default")
+    assert len(results) == 3
+    assert results[0]["rank"] == 1

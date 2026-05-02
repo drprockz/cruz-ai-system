@@ -31,6 +31,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from agents.cruz.cruz_agent import CruzAgent          # noqa: E402
 from agents.base_agent import AgentInput              # noqa: E402
+from services.browser import get_browser_service      # noqa: E402
 from services.conversation import ConversationService  # noqa: E402
 from services.db import get_db_service                # noqa: E402
 from services.ollama import OllamaService             # noqa: E402
@@ -228,6 +229,14 @@ async def health_check() -> JSONResponse:
         results["claude_api"] = "reachable"
     except Exception as exc:
         results["claude_api"] = f"error: {exc}"
+
+    # ── Browser ───────────────────────────────────────────────────────────
+    try:
+        browser = get_browser_service()
+        browser_health = await browser.health()
+        results["browser"] = browser_health
+    except Exception as exc:
+        results["browser"] = {"status": "error", "reason": str(exc)}
 
     # ── Overall status ────────────────────────────────────────────────────
     # Only gate on the LLM backend that's actually in use. If the operator

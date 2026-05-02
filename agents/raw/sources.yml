@@ -1,0 +1,16 @@
+# RAW source registry
+#
+# rss: free RSS feeds (RAW currently has none — populate as needed)
+# pages: non-RSS pages fetched via services/browser
+#
+# Example entries (uncomment/modify on the Mac Mini to enable):
+# pages:
+#   - url: https://www.anthropic.com/news
+#     selector: main
+#     summarize_with: llama3.1:8b
+#   - url: https://news.ycombinator.com/
+#     selector: table.itemlist
+#     summarize_with: llama3.1:8b
+
+rss: []
+pages: []

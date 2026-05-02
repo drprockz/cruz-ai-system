@@ -634,3 +634,220 @@ class TestRawKnowledgeBase:
         ):
             await agent.process(_make_input())
         assert mock_kb_service.write_domain_knowledge.await_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# sources.yml + page-fetch branch (SP4 retrofit)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_raw_loads_sources_yml(tmp_path, monkeypatch):
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "rss:\n  - https://example.com/rss\n"
+        "pages:\n  - url: https://anthropic.com/news\n"
+        "    selector: main\n"
+        "    summarize_with: llama3.1:8b\n"
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent._SOURCES_PATH", str(sources_yml)
+    )
+    from agents.raw.raw_agent import _load_sources
+    sources = _load_sources()
+    assert sources["rss"] == ["https://example.com/rss"]
+    assert len(sources["pages"]) == 1
+    assert sources["pages"][0]["url"] == "https://anthropic.com/news"
+
+
+@pytest.mark.asyncio
+async def test_raw_page_fetch_branch_writes_domain_knowledge(
+    monkeypatch, tmp_path, mock_kb_service,
+):
+    """The page-fetch branch fetches each page, summarises, and writes KB."""
+    from agents.raw.raw_agent import RawAgent
+    import services.browser.service as browser_mod
+
+    fake_browser = MagicMock()
+    fake_browser.fetch = AsyncMock(return_value={
+        "url": "https://anthropic.com/news",
+        "final_url": "https://anthropic.com/news",
+        "status": 200,
+        "title": "News",
+        "html": "<html></html>",
+        "text": "Anthropic released a new model.",
+        "byte_size": 100,
+    })
+    monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "rss: []\n"
+        "pages:\n  - url: https://anthropic.com/news\n"
+        "    selector: main\n"
+        "    summarize_with: llama3.1:8b\n"
+    )
+    monkeypatch.setattr("agents.raw.raw_agent._SOURCES_PATH", str(sources_yml))
+
+    # Mock the existing topic-research path so we don't hit Ollama
+    monkeypatch.setattr(
+        RawAgent, "_research",
+        AsyncMock(return_value=("topic-summary", 0)),
+    )
+    # Mock the new page summariser
+    monkeypatch.setattr(
+        "agents.raw.raw_agent._summarise",
+        AsyncMock(return_value="page summary"),
+    )
+    # Skip Qdrant
+    monkeypatch.setattr(
+        "agents.raw.raw_agent.SemanticMemoryService",
+        MagicMock(return_value=AsyncMock(store=AsyncMock())),
+    )
+    monkeypatch.setattr("agents.raw.raw_agent.get_qdrant_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_embedding_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_db_service", lambda: AsyncMock())
+
+    agent = RawAgent()
+    result = await agent.process({
+        "task": "research",
+        "context": {"mode": "research"},
+        "trace_id": "t1",
+        "conversation_id": "c1",
+    })
+    assert result["success"]
+    fake_browser.fetch.assert_awaited_with(
+        "https://anthropic.com/news", trace_id="t1",
+    )
+    # write_domain_knowledge was called for the page (in addition to topic write)
+    assert mock_kb_service.write_domain_knowledge.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_raw_skips_failed_source_continues(
+    monkeypatch, tmp_path, mock_kb_service,
+):
+    """One source raising BrowserError must not fail the whole RAW run."""
+    from agents.raw.raw_agent import RawAgent
+    from services.browser import BrowserNavigationError
+    import services.browser.service as browser_mod
+
+    call_count = {"n": 0}
+
+    async def flaky_fetch(url, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise BrowserNavigationError("dns fail")
+        return {
+            "url": url, "final_url": url, "status": 200,
+            "title": "ok", "html": "<html></html>", "text": "ok content",
+            "byte_size": 1,
+        }
+
+    fake_browser = MagicMock()
+    fake_browser.fetch = AsyncMock(side_effect=flaky_fetch)
+    monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "rss: []\n"
+        "pages:\n"
+        "  - url: https://broken.example\n    selector: main\n    summarize_with: llama3.1:8b\n"
+        "  - url: https://ok.example\n    selector: main\n    summarize_with: llama3.1:8b\n"
+    )
+    monkeypatch.setattr("agents.raw.raw_agent._SOURCES_PATH", str(sources_yml))
+
+    monkeypatch.setattr(
+        RawAgent, "_research",
+        AsyncMock(return_value=("topic-summary", 0)),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent._summarise",
+        AsyncMock(return_value="page summary"),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent.SemanticMemoryService",
+        MagicMock(return_value=AsyncMock(store=AsyncMock())),
+    )
+    monkeypatch.setattr("agents.raw.raw_agent.get_qdrant_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_embedding_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_db_service", lambda: AsyncMock())
+
+    # Reset the autouse mock's call count for clean assertion
+    mock_kb_service.write_domain_knowledge.reset_mock()
+
+    agent = RawAgent()
+    result = await agent.process({
+        "task": "research",
+        "context": {"mode": "research"},
+        "trace_id": "t1",
+        "conversation_id": "c1",
+    })
+    assert result["success"]
+    assert call_count["n"] == 2
+    # The topic-summary path also writes KB (1 call) plus 1 successful page = 2 total.
+    # The failing page should NOT have triggered a write.
+    # We assert at least 1 page write succeeded:
+    assert any(
+        # one of the calls is for the OK page
+        "ok content" in str(call) or "page summary" in str(call) or "ok.example" in str(call)
+        for call in mock_kb_service.write_domain_knowledge.await_args_list
+    )
+
+
+# ---------------------------------------------------------------------------
+# Latency regression checks (SP4 smoke tests)
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+
+@pytest.mark.asyncio
+async def test_raw_full_run_completes_quickly(monkeypatch, tmp_path, mock_kb_service):
+    """Sanity tripwire: full RAW research-mode run with mocked I/O stays under 5s."""
+    from agents.raw.raw_agent import RawAgent
+    import services.browser.service as browser_mod
+
+    fake_browser = MagicMock()
+    fake_browser.fetch = AsyncMock(return_value={
+        "url": "https://anthropic.com/news",
+        "final_url": "https://anthropic.com/news",
+        "status": 200, "title": "News",
+        "html": "<html></html>", "text": "Anthropic released a new model.",
+        "byte_size": 100,
+    })
+    monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "rss: []\n"
+        "pages:\n  - url: https://anthropic.com/news\n"
+        "    selector: main\n    summarize_with: llama3.1:8b\n"
+    )
+    monkeypatch.setattr("agents.raw.raw_agent._SOURCES_PATH", str(sources_yml))
+
+    monkeypatch.setattr(
+        RawAgent, "_research",
+        AsyncMock(return_value=("topic-summary", 0)),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent._summarise",
+        AsyncMock(return_value="summary"),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent.SemanticMemoryService",
+        MagicMock(return_value=AsyncMock(store=AsyncMock())),
+    )
+    monkeypatch.setattr("agents.raw.raw_agent.get_qdrant_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_embedding_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_db_service", lambda: AsyncMock())
+
+    agent = RawAgent()
+    t0 = _time.monotonic()
+    await agent.process({
+        "task": "research",
+        "context": {"mode": "research"},
+        "trace_id": "t-perf",
+        "conversation_id": "c-perf",
+    })
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 5.0

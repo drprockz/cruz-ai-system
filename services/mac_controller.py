@@ -1,0 +1,93 @@
+"""
+MacControllerService — Layer 2 macOS host control via AppleScript.
+
+Four primitives exposed as five typed CRUZ tools:
+  screenshot, clipboard_read, clipboard_write, open_app, notify.
+
+Plus one internal helper used only by the Calendar agent for
+the AppleScript mirror of Google Calendar events:
+  _calendar_create_local
+
+All AppleScript is executed via `osascript` subprocess with a 10s
+timeout. Non-zero return code raises MacControllerError(stderr).
+No silent failures.
+
+Spec: docs/superpowers/specs/2026-04-26-sp3-mac-controller-design.md §3
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import Optional
+
+logger = logging.getLogger("cruz.services.mac_controller")
+
+# Module-level singleton
+_instance: Optional["MacControllerService"] = None
+
+# Subprocess timeout (seconds) for any osascript / screencapture call.
+_SUBPROCESS_TIMEOUT = 10.0
+
+# Allowed characters for app names — defends against AppleScript injection
+# via the open_app primitive. Letters, digits, spaces, dots, hyphens, underscores.
+_APP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
+
+
+class MacControllerError(RuntimeError):
+    """Raised when an osascript / screencapture call returns non-zero."""
+
+
+def get_mac_controller_service() -> "MacControllerService":
+    """Return the module-level MacControllerService singleton."""
+    global _instance
+    if _instance is None:
+        _instance = MacControllerService()
+    return _instance
+
+
+def _escape_applescript_string(raw: str) -> str:
+    """Escape a Python string for safe inclusion inside an AppleScript double-quoted string.
+
+    AppleScript string literals don't support \\n / \\t escapes — newlines and
+    tabs are concatenated using `" & return & "` and `" & tab & "`.
+    """
+    if raw == "":
+        return ""
+    out = raw.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", '" & return & "').replace("\t", '" & tab & "')
+    return out
+
+
+class MacControllerService:
+    """All public methods are async. All raise MacControllerError on failure."""
+
+    # ── Public primitives ─────────────────────────────────────────────
+    # (filled in by subsequent tasks)
+
+    # ── Internal subprocess runner ────────────────────────────────────
+
+    async def _run_osascript(self, script: str) -> str:
+        """Run a single AppleScript snippet, return stdout (str). Raise on error."""
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=_SUBPROCESS_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise MacControllerError(
+                f"osascript timed out after {_SUBPROCESS_TIMEOUT}s"
+            )
+
+        if proc.returncode != 0:
+            err = stderr_b.decode("utf-8", errors="replace").strip()
+            raise MacControllerError(err or "osascript returned non-zero")
+
+        return stdout_b.decode("utf-8", errors="replace")

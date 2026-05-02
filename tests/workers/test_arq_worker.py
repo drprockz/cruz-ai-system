@@ -47,9 +47,9 @@ class TestWorkerSettingsStructure:
         assert hasattr(WorkerSettings, "cron_jobs")
         assert isinstance(WorkerSettings.cron_jobs, list)
 
-    def test_worker_settings_has_four_cron_jobs(self):
+    def test_worker_settings_has_five_cron_jobs(self):
         from workers.arq_worker import WorkerSettings
-        assert len(WorkerSettings.cron_jobs) == 4
+        assert len(WorkerSettings.cron_jobs) == 5
 
     def test_worker_settings_has_redis_settings(self):
         from workers.arq_worker import WorkerSettings

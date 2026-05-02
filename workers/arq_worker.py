@@ -23,7 +23,7 @@ from workers.tasks.backup_tasks import run_backup
 from workers.tasks.pulse_tasks import run_pulse
 from workers.tasks.raw_tasks import run_raw
 from workers.tasks.reach_tasks import run_reach
-from workers.tasks.dispatch import dispatch_event_to_agent
+from workers.tasks.dispatch import dispatch_event_to_agent, dispatch_event_to_handler
 from workers.tasks.gmail_webhook_tasks import process_gmail_webhook
 from workers.tasks.webhook_tasks import (
     process_github_webhook,
@@ -64,6 +64,7 @@ class WorkerSettings:
         process_google_calendar_webhook,
         process_gmail_webhook,
         dispatch_event_to_agent,
+        dispatch_event_to_handler,
     ]
     after_job_end = on_job_end
 

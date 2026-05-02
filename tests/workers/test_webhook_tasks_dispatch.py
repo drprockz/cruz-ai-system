@@ -101,3 +101,28 @@ async def test_calendar_webhook_dispatches_with_trigger_name():
     assert args[1] == _CalAgent.__module__
     assert args[2] == "_CalAgent"
     assert args[3]["trigger"] == "webhook.google-calendar"
+
+
+@pytest.mark.asyncio
+async def test_webhook_dispatches_to_registered_handler():
+    """When a handler module is registered for a trigger, the webhook
+    fans out a dispatch_event_to_handler enqueue alongside any agent
+    dispatches."""
+    from workers.tasks.dispatch import register_event_handler, clear_handler_registry
+    clear_handler_registry()
+    register_event_handler("workers.handlers.travel_planner", ["webhook.google-calendar"])
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock()
+    with patch("workers.tasks.webhook_tasks._get_arq_pool",
+               return_value=fake_pool):
+        await process_google_calendar_webhook(
+            ctx={},
+            headers={"X-Goog-Resource-State": "exists",
+                     "X-Goog-Channel-ID": "c"},
+        )
+    # Should have one handler enqueue
+    handler_calls = [c for c in fake_pool.enqueue_job.await_args_list
+                     if c.args[0] == "dispatch_event_to_handler"]
+    assert len(handler_calls) == 1
+    assert handler_calls[0].args[1] == "workers.handlers.travel_planner"
+    clear_handler_registry()

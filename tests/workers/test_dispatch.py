@@ -76,3 +76,43 @@ async def test_dispatch_propagates_trace_id_when_present():
         )
     call_args = fake_instance.process.await_args.args[0]
     assert call_args["trace_id"] == "given-trace-7"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_to_handler_imports_module_and_calls_handle():
+    """dispatch_event_to_handler imports the handler module by path,
+    constructs a HandlerContext, and calls handle()."""
+    from workers.tasks.dispatch import dispatch_event_to_handler
+
+    fake_result = type("R", (), {
+        "success": True, "handler_name": "F", "summary": "did-thing",
+    })()
+    fake_handle = AsyncMock(return_value=fake_result)
+    fake_module = type("M", (), {"handle": fake_handle})
+
+    with patch("workers.tasks.dispatch.importlib.import_module",
+               return_value=fake_module):
+        result = await dispatch_event_to_handler(
+            ctx={},
+            module_path="workers.handlers.fake",
+            event={"trigger": "x", "data": {"k": 1}},
+        )
+    fake_handle.assert_awaited_once()
+    call_args = fake_handle.await_args.args
+    # args = (payload_dict, context)
+    assert call_args[0] == {"k": 1}
+    # second arg is HandlerContext — check trace_id propagation if event had one
+    assert result["success"] is True
+    assert result["handler"] == "F"
+
+
+def test_register_event_handler_idempotent():
+    from workers.tasks.dispatch import (
+        HANDLER_REGISTRY, register_event_handler, clear_handler_registry,
+    )
+    clear_handler_registry()
+    register_event_handler("workers.handlers.x", ["t1"])
+    register_event_handler("workers.handlers.x", ["t1"])  # duplicate
+    register_event_handler("workers.handlers.y", ["t1"])
+    assert HANDLER_REGISTRY["t1"] == ["workers.handlers.x", "workers.handlers.y"]
+    clear_handler_registry()

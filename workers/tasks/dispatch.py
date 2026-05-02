@@ -78,3 +78,59 @@ async def dispatch_event_to_agent(
             "requires_approval": False,
             "approval_prompt": None,
         }
+
+
+# ─── Handler registry (parallel to EVENT_REGISTRY for webhook-triggered handlers) ──
+
+HANDLER_REGISTRY: dict[str, list[str]] = {}  # trigger → list of handler module paths
+
+
+def register_event_handler(module_path: str, triggers: list[str]) -> None:
+    """Register a handler module for one or more triggers. Idempotent."""
+    for trigger in triggers:
+        handlers = HANDLER_REGISTRY.setdefault(trigger, [])
+        if module_path not in handlers:
+            handlers.append(module_path)
+            logger.debug(
+                "registered handler %s for trigger %s", module_path, trigger
+            )
+
+
+def clear_handler_registry() -> None:
+    """Test helper — wipe all handler registrations."""
+    HANDLER_REGISTRY.clear()
+
+
+async def dispatch_event_to_handler(
+    ctx: dict,
+    module_path: str,
+    event: dict,
+) -> dict:
+    """Run a handler in response to a registered trigger event.
+
+    Imports the handler module (which has a module-level `handle` function),
+    builds a HandlerContext, calls handle() with the event payload.
+    """
+    from datetime import datetime, timezone
+    from workers.handlers.context import HandlerContext
+
+    trace_id = event.get("trace_id") or f"sp5-handler-{uuid.uuid4()}"
+    try:
+        module = importlib.import_module(module_path)
+        handle = getattr(module, "handle")
+        context = HandlerContext(
+            trace_id=trace_id,
+            now=datetime.now(timezone.utc),
+        )
+        result = await handle(event.get("data", {}), context)
+        return {
+            "success": result.success,
+            "handler": result.handler_name,
+            "summary": result.summary,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[%s] dispatch_event_to_handler failed: %s — %s",
+            trace_id, module_path, exc,
+        )
+        return {"success": False, "handler": module_path, "error": str(exc)}

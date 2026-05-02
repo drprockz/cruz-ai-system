@@ -32,9 +32,13 @@ async def _get_arq_pool():
 
 
 async def _dispatch_to_registered(trigger: str, event_payload: Dict[str, Any]) -> None:
-    """For every agent registered against `trigger`, enqueue a dispatch."""
+    """For every agent registered against `trigger`, enqueue an agent dispatch.
+    For every handler module registered, enqueue a handler dispatch."""
+    from workers.tasks.dispatch import HANDLER_REGISTRY
+
     classes = EVENT_REGISTRY.get(trigger, [])
-    if not classes:
+    handler_modules = HANDLER_REGISTRY.get(trigger, [])
+    if not classes and not handler_modules:
         return
     pool = await _get_arq_pool()
     for cls in classes:
@@ -42,6 +46,12 @@ async def _dispatch_to_registered(trigger: str, event_payload: Dict[str, Any]) -
             "dispatch_event_to_agent",
             cls.__module__,
             cls.__name__,
+            event_payload,
+        )
+    for mod_path in handler_modules:
+        await pool.enqueue_job(
+            "dispatch_event_to_handler",
+            mod_path,
             event_payload,
         )
 

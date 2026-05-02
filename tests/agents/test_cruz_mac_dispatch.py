@@ -104,3 +104,20 @@ async def test_dispatch_mac_tool_error_returns_failure() -> None:
         )
     assert out["success"] is False
     assert "permission denied" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unknown_mac_tool_returns_failure() -> None:
+    """The else-branch in _dispatch_mac_tool: mac_-prefixed but unrecognized name."""
+    cruz = CruzAgent()
+    with patch("agents.cruz.cruz_agent.get_mac_controller_service") as mock_get:
+        # No methods on the mock should be called.
+        out = await cruz._dispatch_tool(
+            tool_name="mac_does_not_exist",
+            tool_input={},
+            trace_id="t1",
+            conversation_id="c1",
+        )
+    assert out["success"] is False
+    assert "Unknown mac tool" in out["error"]
+    assert "'mac_does_not_exist'" in out["error"]

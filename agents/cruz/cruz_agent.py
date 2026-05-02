@@ -794,8 +794,7 @@ class CruzAgent(BaseAgent):
         trace_id: str,
     ) -> AgentOutput:
         """Route mac_* tools directly to MacControllerService."""
-        import time as _time
-        start = _time.monotonic()
+        start = time.monotonic()
         mac = get_mac_controller_service()
         try:
             if tool_name == "mac_screenshot":
@@ -827,7 +826,7 @@ class CruzAgent(BaseAgent):
             else:
                 return AgentOutput(
                     success=False, result=None, agent=self.name,
-                    duration_ms=int((_time.monotonic() - start) * 1000),
+                    duration_ms=int((time.monotonic() - start) * 1000),
                     tokens_used=0,
                     error=f"Unknown mac tool: {tool_name!r}",
                     requires_approval=False, approval_prompt=None,
@@ -835,7 +834,7 @@ class CruzAgent(BaseAgent):
         except MacControllerError as exc:
             return AgentOutput(
                 success=False, result=None, agent=self.name,
-                duration_ms=int((_time.monotonic() - start) * 1000),
+                duration_ms=int((time.monotonic() - start) * 1000),
                 tokens_used=0,
                 error=str(exc),
                 requires_approval=False, approval_prompt=None,
@@ -843,7 +842,7 @@ class CruzAgent(BaseAgent):
 
         return AgentOutput(
             success=True, result=result, agent=self.name,
-            duration_ms=int((_time.monotonic() - start) * 1000),
+            duration_ms=int((time.monotonic() - start) * 1000),
             tokens_used=0,
             error=None,
             requires_approval=False, approval_prompt=None,

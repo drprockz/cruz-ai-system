@@ -721,3 +721,45 @@ async def test_pulse_load_pages_handles_missing_file(tmp_path, monkeypatch):
     )
     from agents.pulse.pulse_agent import _load_pages
     assert _load_pages() == []
+
+
+# ---------------------------------------------------------------------------
+# Latency regression checks (SP4 smoke tests)
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+
+@pytest.mark.asyncio
+async def test_pulse_full_run_completes_quickly(monkeypatch, tmp_path):
+    """Sanity tripwire: full PULSE briefing run with mocked I/O stays under 5s."""
+    from agents.pulse.pulse_agent import PulseAgent
+    import services.browser.service as browser_mod
+
+    fake_browser = MagicMock()
+    fake_browser.fetch = AsyncMock(return_value={
+        "url": "https://techcrunch.com/", "final_url": "https://techcrunch.com/",
+        "status": 200, "title": "TechCrunch", "html": "<html></html>",
+        "text": "Big AI news today.", "byte_size": 100,
+    })
+    monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "pages:\n  - url: https://techcrunch.com/\n    selector: main\n"
+    )
+    monkeypatch.setattr("agents.pulse.pulse_agent._SOURCES_PATH", str(sources_yml))
+
+    agent = PulseAgent()
+    t0 = _time.monotonic()
+    with (
+        patch("agents.pulse.pulse_agent.get_db_service", return_value=_mock_db()),
+        patch("agents.pulse.pulse_agent.OllamaService", return_value=_mock_ollama()),
+        patch("agents.pulse.pulse_agent.SemanticMemoryService", return_value=_mock_semantic_memory()),
+        patch("agents.pulse.pulse_agent.get_qdrant_service"),
+        patch("agents.pulse.pulse_agent.get_embedding_service"),
+        patch("agents.pulse.pulse_agent._fetch_calendar_events", return_value=[]),
+    ):
+        await agent.process(_make_input())
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 5.0

@@ -792,3 +792,62 @@ async def test_raw_skips_failed_source_continues(
         "ok content" in str(call) or "page summary" in str(call) or "ok.example" in str(call)
         for call in mock_kb_service.write_domain_knowledge.await_args_list
     )
+
+
+# ---------------------------------------------------------------------------
+# Latency regression checks (SP4 smoke tests)
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+
+@pytest.mark.asyncio
+async def test_raw_full_run_completes_quickly(monkeypatch, tmp_path, mock_kb_service):
+    """Sanity tripwire: full RAW research-mode run with mocked I/O stays under 5s."""
+    from agents.raw.raw_agent import RawAgent
+    import services.browser.service as browser_mod
+
+    fake_browser = MagicMock()
+    fake_browser.fetch = AsyncMock(return_value={
+        "url": "https://anthropic.com/news",
+        "final_url": "https://anthropic.com/news",
+        "status": 200, "title": "News",
+        "html": "<html></html>", "text": "Anthropic released a new model.",
+        "byte_size": 100,
+    })
+    monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+    sources_yml = tmp_path / "sources.yml"
+    sources_yml.write_text(
+        "rss: []\n"
+        "pages:\n  - url: https://anthropic.com/news\n"
+        "    selector: main\n    summarize_with: llama3.1:8b\n"
+    )
+    monkeypatch.setattr("agents.raw.raw_agent._SOURCES_PATH", str(sources_yml))
+
+    monkeypatch.setattr(
+        RawAgent, "_research",
+        AsyncMock(return_value=("topic-summary", 0)),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent._summarise",
+        AsyncMock(return_value="summary"),
+    )
+    monkeypatch.setattr(
+        "agents.raw.raw_agent.SemanticMemoryService",
+        MagicMock(return_value=AsyncMock(store=AsyncMock())),
+    )
+    monkeypatch.setattr("agents.raw.raw_agent.get_qdrant_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_embedding_service", lambda: MagicMock())
+    monkeypatch.setattr("agents.raw.raw_agent.get_db_service", lambda: AsyncMock())
+
+    agent = RawAgent()
+    t0 = _time.monotonic()
+    await agent.process({
+        "task": "research",
+        "context": {"mode": "research"},
+        "trace_id": "t-perf",
+        "conversation_id": "c-perf",
+    })
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 5.0

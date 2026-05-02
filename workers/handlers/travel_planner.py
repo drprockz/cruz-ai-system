@@ -48,6 +48,13 @@ async def _compose_logistics(event: Dict[str, Any]) -> str:
 async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerResult:
     """Run the travel-planner check for an inbound calendar event.
 
+    NOTE (Chunk 8 wiring): This handler expects `payload` to be a calendar
+    event dict with at minimum {"id", "location", "summary", "start"}.
+    The current `process_google_calendar_webhook` only forwards Pub/Sub
+    headers — Chunk 8 must enrich the payload with the resolved event
+    via the Calendar API before this handler can fire. Until then,
+    every webhook → "skipped (not travel)".
+
     Args:
         payload: The calendar event dict (data sub-dict from webhook
                  envelope), shape:
@@ -112,7 +119,8 @@ async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerRes
     return HandlerResult(**result_kwargs)
 
 
-# Auto-register on import — Chunk 8 imports all handlers at app boot.
+# Auto-register on import (load-bearing): Chunk 8 imports all handlers at
+# app boot; removing this line silently disables Travel Planner in production.
 from workers.tasks.dispatch import register_event_handler  # noqa: E402
 
 register_event_handler(__name__, ["webhook.google-calendar"])

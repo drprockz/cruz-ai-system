@@ -58,6 +58,11 @@ async def test_travel_planner_skips_local_events(ctx, monkeypatch):
 
 def test_is_outside_home_city(monkeypatch):
     from workers.handlers.travel_planner import _is_outside_home_city
+
+    # Unset HOME_CITY → conservatively returns False
+    monkeypatch.delenv("HOME_CITY", raising=False)
+    assert _is_outside_home_city("Tokyo") is False
+
     monkeypatch.setenv("HOME_CITY", "Bangalore")
     assert _is_outside_home_city("Tokyo, Japan") is True
     assert _is_outside_home_city("Bangalore Office") is False

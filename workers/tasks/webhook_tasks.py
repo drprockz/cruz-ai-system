@@ -105,6 +105,10 @@ async def process_google_calendar_webhook(
     channel_id = headers.get("X-Goog-Channel-ID") or headers.get("x-goog-channel-id")
     logger.info("google-calendar webhook state=%s channel=%s", state, channel_id)
     summary = {"resource_state": state, "channel_id": channel_id}
+    # Chunk 8 will resolve the changed event via the Calendar API and
+    # populate {"event": {id, location, summary, start, ...}} into
+    # `data` before this dispatch. Until then, Travel Planner sees only
+    # headers and skips with "not travel".
     await _dispatch_to_registered(
         "webhook.google-calendar",
         {"trigger": "webhook.google-calendar", "data": {"headers": headers,

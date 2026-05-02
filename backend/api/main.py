@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Literal, Optional
@@ -1117,6 +1118,40 @@ async def deny_approval(approval_id: str) -> JSONResponse:
     """
     result = await _respond_to_approval(approval_id, "denied")
     return JSONResponse(status_code=200, content=result)
+
+
+# ─── Notification callbacks (SP5) ───────────────────────────────────────────
+
+
+class FalseAlarmRequest(BaseModel):
+    """Request body for a user-acked false-critical notification."""
+
+    agent: str
+    dedup_key: str
+
+
+@app.post("/notifications/false-alarm")
+async def notifications_false_alarm(req: FalseAlarmRequest) -> JSONResponse:
+    """Record a user-acked false-critical for the SP5 exit-gate measurement.
+
+    Called by Telegram inline button on a `critical` notification, OR by
+    any other channel that wants to surface a false-positive ack.
+    Writes agent_state(<agent>, "false_critical:<dedup_key>") and stays
+    silent — no further action. The SP5 daily briefing handler scans
+    these rows for the 7-day measurement window.
+
+    Spec: docs/superpowers/specs/2026-04-26-sp5-event-loop-design.md §7, §8.2
+    """
+    from services.agent_state import get_state_service
+
+    state = get_state_service()
+    await state.set(
+        req.agent,
+        f"false_critical:{req.dedup_key}",
+        {"ack_at": time.time(), "agent": req.agent, "dedup_key": req.dedup_key},
+        ttl_seconds=86400 * 365,
+    )
+    return JSONResponse(status_code=200, content={"recorded": True})
 
 
 # ── SPA mount (must be the LAST route registered so it doesn't shadow API routes) ──

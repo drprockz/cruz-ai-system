@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +42,7 @@ _instance: Optional["GCalService"] = None
 
 
 def get_gcal_service() -> "GCalService":
+    """Return the module-level GCalService singleton."""
     global _instance
     if _instance is None:
         _instance = GCalService()
@@ -63,6 +65,7 @@ class GCalService:
         self._default_calendar_id = os.environ.get(
             "GCAL_DEFAULT_CALENDAR_ID", _DEFAULT_CALENDAR_ID
         )
+        self._refresh_lock = threading.Lock()
 
     # ── Auth ───────────────────────────────────────────────────────────
 
@@ -91,14 +94,15 @@ class GCalService:
 
         # Refresh if needed.
         if not creds.valid:
-            from google.auth.transport.requests import Request
-            try:
-                creds.refresh(Request())
-            except Exception as exc:
-                raise GCalAuthError(f"token refresh failed: {exc}") from exc
-            # Persist refreshed token back to disk.
-            data["token"] = creds.token
-            self._token_path.write_text(json.dumps(data, indent=2))
+            with self._refresh_lock:
+                if not creds.valid:
+                    from google.auth.transport.requests import Request
+                    try:
+                        creds.refresh(Request())
+                    except Exception as exc:
+                        raise GCalAuthError(f"token refresh failed: {exc}") from exc
+                    data["token"] = creds.token
+                    self._token_path.write_text(json.dumps(data, indent=2))
 
         return creds
 
@@ -198,7 +202,14 @@ class GCalService:
 
 
 def _ensure_z(iso: str) -> str:
-    """Append 'Z' UTC marker if the ISO string has no offset."""
+    """Append 'Z' UTC marker if the ISO string has no offset.
+
+    Returns date-only strings (length < 11) unchanged — they are not
+    datetimes and the caller is responsible for using `date` rather than
+    `dateTime` in the event body.
+    """
+    if len(iso) < 11:
+        return iso
     if iso.endswith("Z") or "+" in iso[10:] or "-" in iso[10:]:
         return iso
     return iso + "Z"

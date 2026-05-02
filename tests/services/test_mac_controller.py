@@ -250,3 +250,54 @@ async def test_screenshot_timeout() -> None:
     ):
         with pytest.raises(MacControllerError, match="timed out"):
             await svc.screenshot()
+
+
+# ── _calendar_create_local ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_calendar_create_local_basic() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")) as run:
+        await svc._calendar_create_local(
+            title="Deep work",
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T12:00:00",
+            calendar_name="Calendar",
+        )
+    script = run.await_args.args[0]
+    assert 'tell application "Calendar"' in script
+    assert 'tell calendar "Calendar"' in script
+    assert "make new event" in script
+    assert "Deep work" in script
+    # AppleScript date literal — _iso_to_applescript_date converts ISO to MM/DD/YYYY HH:MM:SS
+    assert 'date "05/01/2026 10:00:00"' in script
+    assert 'date "05/01/2026 12:00:00"' in script
+
+
+@pytest.mark.asyncio
+async def test_calendar_create_local_escapes_title() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")) as run:
+        await svc._calendar_create_local(
+            title='Call "Acme Inc."',
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T11:00:00",
+        )
+    script = run.await_args.args[0]
+    assert '\\"Acme Inc.\\"' in script
+
+
+@pytest.mark.asyncio
+async def test_calendar_create_local_propagates_error() -> None:
+    svc = MacControllerService()
+    with patch.object(
+        svc, "_run_osascript",
+        new=AsyncMock(side_effect=MacControllerError("calendar not found")),
+    ):
+        with pytest.raises(MacControllerError, match="calendar not found"):
+            await svc._calendar_create_local(
+                title="x",
+                start_iso="2026-05-01T10:00:00",
+                end_iso="2026-05-01T11:00:00",
+            )

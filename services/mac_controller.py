@@ -47,6 +47,22 @@ def get_mac_controller_service() -> "MacControllerService":
     return _instance
 
 
+def _iso_to_applescript_date(iso: str) -> str:
+    """Convert ISO 8601 datetime to an AppleScript `date "..."` expression.
+
+    AppleScript's `date` function reliably parses 'MM/DD/YYYY HH:MM:SS'.
+    Strips timezone if present (Calendar.app uses local tz of the Mac).
+    """
+    from datetime import datetime
+    # Tolerate trailing Z or +HH:MM
+    cleaned = iso.replace("Z", "")
+    if "+" in cleaned[10:]:
+        cleaned = cleaned[: cleaned.rindex("+")]
+    dt = datetime.fromisoformat(cleaned)
+    formatted = dt.strftime("%m/%d/%Y %H:%M:%S")
+    return f'date "{formatted}"'
+
+
 def _escape_applescript_string(raw: str) -> str:
     """Escape a Python string for safe inclusion inside an AppleScript double-quoted string.
 
@@ -130,6 +146,39 @@ class MacControllerService:
         script = f'display notification "{body_esc}" with title "{title_esc}"'
         if sound:
             script += ' sound name "Submarine"'
+        await self._run_osascript(script)
+
+    # ── Internal Calendar helper ──────────────────────────────────────
+
+    async def _calendar_create_local(
+        self,
+        title: str,
+        start_iso: str,
+        end_iso: str,
+        calendar_name: str = "Calendar",
+    ) -> None:
+        """Create a Calendar.app event in the named local calendar.
+
+        Internal helper used by the Calendar agent for the AppleScript
+        mirror of Google Calendar events. NOT a CRUZ tool.
+
+        start_iso / end_iso must be ISO 8601 with seconds (e.g. 2026-05-01T10:00:00).
+        Calendar.app requires AppleScript date literals — we build them with
+        `date "<MM/DD/YYYY HH:MM:SS>"` form which AppleScript parses unambiguously.
+        """
+        title_esc = _escape_applescript_string(title)
+        cal_esc = _escape_applescript_string(calendar_name)
+        start_as = _iso_to_applescript_date(start_iso)
+        end_as = _iso_to_applescript_date(end_iso)
+
+        script = (
+            f'tell application "Calendar"\n'
+            f'  tell calendar "{cal_esc}"\n'
+            f'    make new event with properties '
+            f'{{summary:"{title_esc}", start date:{start_as}, end date:{end_as}}}\n'
+            f'  end tell\n'
+            f'end tell'
+        )
         await self._run_osascript(script)
 
     # ── Internal subprocess runner ────────────────────────────────────

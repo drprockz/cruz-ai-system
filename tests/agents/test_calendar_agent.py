@@ -392,3 +392,6 @@ async def test_create_event_with_attendees_send_true_actually_sends() -> None:
     fake_gcal.create_event.assert_awaited_once()
     body_kwargs = fake_gcal.create_event.await_args.kwargs
     assert body_kwargs["attendees"] == ["client@acme.com"]
+    # observe_interaction must NOT fire on attendees-present path
+    # (KB pattern learning is gated to self-only successful creates).
+    fake_kb.observe_interaction.assert_not_awaited()

@@ -138,7 +138,24 @@ class CalendarAgent(BaseAgent):
     # ── placeholders, filled by Tasks 14 + 15 ───────────────────────
 
     async def _list_events(self, input: AgentInput, start: float) -> AgentOutput:
-        raise NotImplementedError("filled in Task 14")
+        ctx = input["context"]
+        start_iso = ctx["start_iso"]
+        end_iso = ctx["end_iso"]
+        calendar_id = ctx.get("calendar_id")
+
+        gcal = get_gcal_service()
+        try:
+            kwargs = {"calendar_id": calendar_id} if calendar_id else {}
+            events = await gcal.list_events(start_iso, end_iso, **kwargs)
+        except GCalError as exc:
+            return _failure(self.name, start, str(exc))
+
+        return AgentOutput(
+            success=True, result=events, agent=self.name,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            tokens_used=0, error=None,
+            requires_approval=False, approval_prompt=None,
+        )
 
     async def _create_event(self, input: AgentInput, start: float) -> AgentOutput:
         raise NotImplementedError("filled in Task 15")

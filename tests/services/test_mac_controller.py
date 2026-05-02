@@ -134,3 +134,47 @@ async def test_clipboard_write_empty_string_ok() -> None:
     svc = MacControllerService()
     with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")):
         await svc.clipboard_write("")  # must not raise
+
+
+# ── open_app ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_open_app_basic() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")) as run:
+        await svc.open_app("TextEdit")
+    script = run.await_args.args[0]
+    assert 'tell application "TextEdit" to activate' == script
+
+
+@pytest.mark.asyncio
+async def test_open_app_allows_safe_chars() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")):
+        await svc.open_app("Visual Studio Code")
+        await svc.open_app("Plane.so")
+        await svc.open_app("My_App-1")  # no raise
+
+
+@pytest.mark.asyncio
+async def test_open_app_rejects_injection() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")):
+        with pytest.raises(MacControllerError, match="invalid app name"):
+            await svc.open_app('TextEdit"; do shell script "rm -rf /')
+        with pytest.raises(MacControllerError, match="invalid app name"):
+            await svc.open_app("TextEdit\nMail")
+        with pytest.raises(MacControllerError, match="invalid app name"):
+            await svc.open_app("")
+
+
+@pytest.mark.asyncio
+async def test_open_app_propagates_osascript_error() -> None:
+    svc = MacControllerService()
+    with patch.object(
+        svc, "_run_osascript",
+        new=AsyncMock(side_effect=MacControllerError("application not found")),
+    ):
+        with pytest.raises(MacControllerError, match="application not found"):
+            await svc.open_app("NonexistentApp")

@@ -75,6 +75,16 @@ class MacControllerService:
         text_esc = _escape_applescript_string(text)
         await self._run_osascript(f'set the clipboard to "{text_esc}"')
 
+    async def open_app(self, name: str) -> None:
+        """Activate (launch + foreground) a macOS app by name.
+
+        App name is validated against _APP_NAME_RE to defend against
+        AppleScript injection through this primitive.
+        """
+        if not _APP_NAME_RE.match(name):
+            raise MacControllerError(f"invalid app name: {name!r}")
+        await self._run_osascript(f'tell application "{name}" to activate')
+
     async def notify(self, title: str, body: str, sound: bool = False) -> None:
         """Fire a macOS Notification Center banner."""
         title_esc = _escape_applescript_string(title)

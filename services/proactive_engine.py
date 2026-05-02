@@ -49,3 +49,181 @@ class GateRequest:
     dedup_key: str
     payload: dict[str, Any]
     valid_critical_reasons: set[str] = field(default_factory=set)
+
+
+class ProactiveEngine:
+    """Central gate. One instance per process."""
+
+    # ── Gate parameters (spec §3.2) ─────────────────────────────────
+    GLOBAL_DAILY_RATE_LIMIT  = 8           # non-info pings/day across all agents
+    PER_AGENT_INFO_DAILY_CAP = 20          # info pings/day per agent
+    PER_AGENT_COOLDOWN_ANY   = 3600        # 1h
+    PER_AGENT_COOLDOWN_CRIT  = 86400       # 24h
+    DEDUP_WINDOW             = 86400 * 7   # 7d
+
+    GATE_AGENT = "_gate"
+    GLOBAL_AGENT = "_global"
+
+    def __init__(self, state: Any, db: Any) -> None:
+        """Initialize with StateService and a DB execute-capable object."""
+        self._state = state
+        self._db = db
+
+    async def allow(self, req: GateRequest) -> GateDecision:
+        """Run the gate decision algorithm (spec §3.2)."""
+        decision = await self._decide(req)
+        await self._post_decision(req, decision)
+        await self._log_decision(req, decision)
+        return decision
+
+    async def _decide(self, req: GateRequest) -> GateDecision:
+        """Apply gate steps in order and return the decision."""
+        # Step 1: Whitelist
+        if req.severity == "critical":
+            if (req.reason_code is None
+                    or req.reason_code not in req.valid_critical_reasons):
+                return GateDecision.DEMOTE_TO_WARN
+
+        # Step 2: Dedup
+        dedup_key = f"dedup:{req.agent}:{req.dedup_key}"
+        if await self._state.get(self.GATE_AGENT, dedup_key) is not None:
+            return GateDecision.SUPPRESS
+
+        # Step 3: Critical cooldown
+        if req.severity == "critical":
+            cool_crit = await self._state.get(
+                self.GATE_AGENT, f"cooldown:{req.agent}:critical")
+            if cool_crit is not None and time.time() - cool_crit < self.PER_AGENT_COOLDOWN_CRIT:
+                return GateDecision.SUPPRESS
+
+        # Step 4: Per-agent cooldown
+        cool_any = await self._state.get(
+            self.GATE_AGENT, f"cooldown:{req.agent}:any")
+        if cool_any is not None and time.time() - cool_any < self.PER_AGENT_COOLDOWN_ANY:
+            if req.severity == "info":
+                # Step 4a: per-agent info safety cap
+                today = self._today()
+                cnt = await self._state.get(
+                    self.GLOBAL_AGENT,
+                    f"info_count_per_agent:{req.agent}:{today}",
+                    default=0,
+                )
+                if cnt >= self.PER_AGENT_INFO_DAILY_CAP:
+                    return GateDecision.SUPPRESS
+                return GateDecision.ALLOW
+            return GateDecision.DEMOTE_TO_INFO
+
+        # Step 5: Global daily rate limit (non-info only)
+        if req.severity != "info":
+            today = self._today()
+            daily = await self._state.get(
+                self.GLOBAL_AGENT, f"daily_count:{today}", default=0)
+            if daily >= self.GLOBAL_DAILY_RATE_LIMIT:
+                return GateDecision.SUPPRESS
+
+        # Step 4a (re-check for info path that didn't hit cooldown)
+        if req.severity == "info":
+            today = self._today()
+            cnt = await self._state.get(
+                self.GLOBAL_AGENT,
+                f"info_count_per_agent:{req.agent}:{today}",
+                default=0,
+            )
+            if cnt >= self.PER_AGENT_INFO_DAILY_CAP:
+                return GateDecision.SUPPRESS
+
+        return GateDecision.ALLOW
+
+    async def _post_decision(self, req: GateRequest, decision: GateDecision) -> None:
+        """Update counters/cooldowns after a non-suppressed decision."""
+        if decision == GateDecision.SUPPRESS:
+            return
+
+        now_ts = time.time()
+        today = self._today()
+
+        # Per-agent any-cooldown (always set when something routes)
+        await self._state.set(
+            self.GATE_AGENT, f"cooldown:{req.agent}:any", now_ts,
+            ttl_seconds=self.PER_AGENT_COOLDOWN_ANY,
+        )
+
+        # Critical cooldown only when this was actually a critical that ALLOWed
+        if decision == GateDecision.ALLOW and req.severity == "critical":
+            await self._state.set(
+                self.GATE_AGENT, f"cooldown:{req.agent}:critical", now_ts,
+                ttl_seconds=self.PER_AGENT_COOLDOWN_CRIT,
+            )
+
+        # Dedup key (always set when routed — prevents repeat of the same logical ping)
+        await self._state.set(
+            self.GATE_AGENT, f"dedup:{req.agent}:{req.dedup_key}", now_ts,
+            ttl_seconds=self.DEDUP_WINDOW,
+        )
+
+        # Counter: routed severity. Use the EFFECTIVE severity after demotion.
+        eff_severity = self._effective_severity(req.severity, decision)
+        if eff_severity == "info":
+            cnt_key = f"info_count_per_agent:{req.agent}:{today}"
+            cnt = await self._state.get(self.GLOBAL_AGENT, cnt_key, default=0)
+            await self._state.set(
+                self.GLOBAL_AGENT, cnt_key, cnt + 1,
+                ttl_seconds=86400 * 2,
+            )
+        else:
+            cnt = await self._state.get(
+                self.GLOBAL_AGENT, f"daily_count:{today}", default=0)
+            await self._state.set(
+                self.GLOBAL_AGENT, f"daily_count:{today}", cnt + 1,
+                ttl_seconds=86400 * 2,
+            )
+
+    async def _log_decision(self, req: GateRequest, decision: GateDecision) -> None:
+        """Write a row to agent_logs with action='gate_decision'."""
+        try:
+            await self._db.execute(
+                """
+                INSERT INTO agent_logs
+                    (trace_id, agent, action, status, input_data, output_data,
+                     tokens_used, duration_ms)
+                VALUES ($1, $2, 'gate_decision', $3, $4::jsonb, $5::jsonb, 0, 0)
+                """,
+                req.payload.get("trace_id", "no-trace"),
+                req.agent,
+                decision.value,
+                json.dumps({
+                    "severity": req.severity,
+                    "reason_code": req.reason_code,
+                    "dedup_key": req.dedup_key,
+                }),
+                json.dumps({"decision": decision.value}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gate_decision log failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _effective_severity(severity: str, decision: GateDecision) -> str:
+        """Return the effective severity after demotion."""
+        if decision == GateDecision.ALLOW:
+            return severity
+        if decision == GateDecision.DEMOTE_TO_WARN:
+            return "warn"
+        if decision == GateDecision.DEMOTE_TO_INFO:
+            return "info"
+        return severity  # SUPPRESS — caller skips
+
+    @staticmethod
+    def _today() -> str:
+        """UTC date string for daily counters."""
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+_instance: Optional[ProactiveEngine] = None
+
+
+def get_proactive_engine() -> ProactiveEngine:
+    """Return the process-level ProactiveEngine singleton."""
+    global _instance
+    if _instance is None:
+        _instance = ProactiveEngine(get_state_service(), get_db_service())
+    return _instance

@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from services.knowledge_base import get_kb_service
 from services.notification_router import get_notification_router
 from services.proactive_engine import (
     GateDecision,
@@ -60,6 +59,7 @@ class HandlerContext:
     @property
     def kb(self):
         if self._kb is None:
+            from services.knowledge_base import get_kb_service
             self._kb = get_kb_service()
         return self._kb
 

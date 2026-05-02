@@ -943,6 +943,54 @@ class CruzAgent(BaseAgent):
                         })
                         continue
 
+                    # ── Built-in tools: web_search / fetch_url ────────
+                    if tu.name in ("web_search", "fetch_url"):
+                        from services.browser import (
+                            get_browser_service,
+                            BrowserCaptchaDetected,
+                            BrowserRateLimited,
+                            BrowserError,
+                        )
+                        yield ToolStart(
+                            agent=tu.name,
+                            summary=f"Running {tu.name}.",
+                        )
+                        ti = tu.input or {}
+                        try:
+                            if tu.name == "web_search":
+                                results = await get_browser_service().search(
+                                    ti.get("query", ""),
+                                    limit=int(ti.get("limit", 5)),
+                                    trace_id=trace_id,
+                                )
+                                content = (
+                                    "\n".join(
+                                        f"{r['rank']}. {r['title']} — {r['url']}\n   {r['snippet']}"
+                                        for r in results
+                                    ) if results else "no results"
+                                )
+                            else:  # fetch_url
+                                text = await get_browser_service().extract_text(
+                                    ti.get("url", ""), trace_id=trace_id,
+                                )
+                                content = text[: int(ti.get("max_chars", 8000))]
+                        except BrowserCaptchaDetected as exc:
+                            content = f"{tu.name} blocked: {exc.kind} on {exc.url}"
+                        except BrowserRateLimited as exc:
+                            content = f"{tu.name} rate-limited at {exc.domain}"
+                        except BrowserError as exc:
+                            content = f"{tu.name} failed: {exc}"
+                        tool_result_blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_use_id,
+                            "content": content,
+                        })
+                        yield ToolFinish(
+                            agent=tu.name,
+                            result_preview=content[:200],
+                        )
+                        continue
+
                     yield ToolStart(
                         agent=tu.name,
                         summary=_TOOL_INTRO.get(tu.name, f"Running {tu.name}."),

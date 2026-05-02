@@ -28,9 +28,11 @@ import logging
 import os
 import time
 import uuid as _uuid
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import anthropic
+import yaml
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
@@ -58,6 +60,39 @@ _DEPS_SYSTEM = (
     "and any breaking changes to watch for. "
     "Return a concise markdown summary with action items."
 )
+
+
+_SOURCES_PATH = str(Path(__file__).parent / "sources.yml")
+
+
+def _load_sources() -> dict:
+    """Load sources.yml; return dict with 'rss' and 'pages' keys."""
+    try:
+        with open(_SOURCES_PATH, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return {
+            "rss": data.get("rss") or [],
+            "pages": data.get("pages") or [],
+        }
+    except FileNotFoundError:
+        return {"rss": [], "pages": []}
+
+
+async def _summarise(text: str, *, model: str = "llama3.1:8b") -> str:
+    """Summarise raw page text with the local Ollama model.
+
+    Module-level so tests can monkeypatch it cleanly.
+    """
+    svc = OllamaService()
+    resp = await svc.generate(
+        model=model,
+        prompt=(
+            "Summarise the following page text in 4-6 bullet points. "
+            "Focus on factual claims, names, dates, and concrete actions:\n\n"
+            f"{text[:6000]}"
+        ),
+    )
+    return (resp.get("response") or "").strip()
 
 
 class RawAgent(BaseAgent):
@@ -152,6 +187,52 @@ class RawAgent(BaseAgent):
                     input["trace_id"],
                     kb_exc,
                 )
+
+            # ── Browser-sourced pages branch (new in SP4) ───────────────────
+            # Only when mode == "research" — dependencies mode is unrelated.
+            if mode == "research":
+                from services.browser import (
+                    get_browser_service,
+                    BrowserError,
+                )
+                sources = _load_sources()
+                for entry in sources.get("pages", []):
+                    url = entry.get("url")
+                    if not url:
+                        continue
+                    try:
+                        page = await get_browser_service().fetch(
+                            url, trace_id=input["trace_id"]
+                        )
+                    except BrowserError as exc:
+                        logger.warning(
+                            "[%s] RAW skipping %s: %s",
+                            input["trace_id"], url, exc,
+                        )
+                        continue
+                    try:
+                        page_summary = await _summarise(
+                            page["text"],
+                            model=entry.get("summarize_with", _MODEL),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] RAW _summarise failed for %s: %s",
+                            input["trace_id"], url, exc,
+                        )
+                        continue
+                    try:
+                        await kb.write_domain_knowledge(
+                            content=page_summary[:1000],
+                            topic=entry.get("topic") or page.get("title") or url,
+                            source="raw_agent",
+                            trace_id=input["trace_id"],
+                        )
+                    except Exception as kb_exc:
+                        logger.warning(
+                            "[%s] write_domain_knowledge failed for %s: %s",
+                            input["trace_id"], url, kb_exc,
+                        )
 
             duration = int((time.monotonic() - start) * 1000)
             try:

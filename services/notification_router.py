@@ -101,6 +101,7 @@ class TelegramChannel:
         chat_id: str | None = None,
         feed_topic_id: str | int | None = None,
     ) -> None:
+        """Resolve credentials from args, then env vars; warn if either is missing."""
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         topic = feed_topic_id if feed_topic_id is not None \

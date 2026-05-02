@@ -22,6 +22,7 @@ from services.browser.errors import (
     BrowserTimeoutError,
     BrowserNavigationError,
     BrowserRateLimited,
+    BrowserCaptchaDetected,
 )
 from services.browser.rate_limit import (
     TokenBucketSpec,
@@ -32,6 +33,7 @@ from services.browser.parsers import (
     PageResult,
     SearchResult,
     _parse_ddg_html,
+    _detect_captcha,
 )
 
 logger = logging.getLogger("cruz.services.browser")
@@ -191,6 +193,9 @@ class BrowserService:
                     if not BROWSER_PACE_DISABLED and wait_for is None:
                         await asyncio.sleep(random.uniform(0.5, 1.5))
                     html = await page.content()
+                    kind = _detect_captcha(html, url)
+                    if kind is not None:
+                        raise BrowserCaptchaDetected(url=url, kind=kind)
                     title = await page.title()
                     text = await page.evaluate("document.body ? document.body.innerText : ''")
                     status = resp.status if resp else 0

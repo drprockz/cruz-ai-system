@@ -5,8 +5,9 @@ markup, update only this file.
 """
 from __future__ import annotations
 
+import re as _re_captcha
 import urllib.parse
-from typing import List, TypedDict
+from typing import List, Optional, TypedDict
 
 
 class SearchResult(TypedDict):
@@ -24,6 +25,18 @@ class PageResult(TypedDict):
     html: str
     text: str
     byte_size: int
+
+
+_CAPTCHA_TEXT_PATTERN = _re_captcha.compile(
+    r"please verify you are (a )?human|are you a robot|press and hold to confirm",
+    _re_captcha.IGNORECASE,
+)
+
+# Patterns indicating documentation or discussion about captchas, not an actual challenge
+_CAPTCHA_META_PATTERN = _re_captcha.compile(
+    r"how (captcha|recaptcha|hcaptcha|turnstile) works|explains?.*(captcha|challenge)",
+    _re_captcha.IGNORECASE,
+)
 
 
 def _parse_ddg_html(html: str) -> List[SearchResult]:
@@ -59,3 +72,29 @@ def _parse_ddg_html(html: str) -> List[SearchResult]:
             )
         )
     return results
+
+
+def _detect_captcha(html: str, url: str) -> Optional[str]:
+    """Return the captcha kind if a challenge is detected on the page, else None.
+
+    Heuristic — over-detects deliberately. False positives surface to caller as
+    BrowserCaptchaDetected; caller decides how to fall back. Pure function over
+    HTML, fully testable.
+    """
+    if not html:
+        return None
+    lower = html.lower()
+    # Iframe-based challenges
+    if 'src="https://www.google.com/recaptcha/' in lower:
+        return "recaptcha"
+    if 'src="https://newassets.hcaptcha.com/' in lower or 'class="h-captcha"' in lower:
+        return "hcaptcha"
+    if 'src="https://challenges.cloudflare.com/turnstile/' in lower:
+        return "turnstile"
+    # Text heuristic — body content asks the user to prove they're human
+    # But exclude documentation pages that explain captchas in general
+    if _CAPTCHA_TEXT_PATTERN.search(html):
+        if _CAPTCHA_META_PATTERN.search(html):
+            return None
+        return "text_heuristic"
+    return None

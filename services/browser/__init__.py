@@ -7,7 +7,7 @@ from services.browser.errors import (
     BrowserRateLimited,
     BrowserProfileError,
 )
-from services.browser.parsers import PageResult, SearchResult, _parse_ddg_html
+from services.browser.parsers import PageResult, SearchResult, _parse_ddg_html, _detect_captcha
 from services.browser.service import BrowserService, get_browser_service
 
 __all__ = [
@@ -21,5 +21,6 @@ __all__ = [
     "PageResult",
     "SearchResult",
     "_parse_ddg_html",
+    "_detect_captcha",
     "get_browser_service",
 ]

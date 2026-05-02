@@ -64,7 +64,15 @@ class MacControllerService:
     """All public methods are async. All raise MacControllerError on failure."""
 
     # ── Public primitives ─────────────────────────────────────────────
-    # (filled in by subsequent tasks)
+
+    async def notify(self, title: str, body: str, sound: bool = False) -> None:
+        """Fire a macOS Notification Center banner."""
+        title_esc = _escape_applescript_string(title)
+        body_esc = _escape_applescript_string(body)
+        script = f'display notification "{body_esc}" with title "{title_esc}"'
+        if sound:
+            script += ' sound name "Submarine"'
+        await self._run_osascript(script)
 
     # ── Internal subprocess runner ────────────────────────────────────
 

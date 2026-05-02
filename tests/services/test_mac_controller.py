@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -178,3 +179,74 @@ async def test_open_app_propagates_osascript_error() -> None:
     ):
         with pytest.raises(MacControllerError, match="application not found"):
             await svc.open_app("NonexistentApp")
+
+
+# ── screenshot ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_screenshot_full_screen() -> None:
+    svc = MacControllerService()
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(fake_png, b""))
+    mock_proc.returncode = 0
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ) as create:
+        result = await svc.screenshot()
+    assert result == fake_png
+    args = create.await_args.args
+    assert args[0] == "screencapture"
+    assert "-x" in args
+    assert "-t" in args and "png" in args
+    assert "-" in args  # stdout marker
+    assert "-R" not in args  # no region
+
+
+@pytest.mark.asyncio
+async def test_screenshot_with_region() -> None:
+    svc = MacControllerService()
+    fake_png = b"\x89PNG"
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(fake_png, b""))
+    mock_proc.returncode = 0
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ) as create:
+        await svc.screenshot(region=(100, 200, 800, 600))
+    args = create.await_args.args
+    assert "-R" in args
+    r_idx = args.index("-R")
+    assert args[r_idx + 1] == "100,200,800,600"
+
+
+@pytest.mark.asyncio
+async def test_screenshot_propagates_error() -> None:
+    svc = MacControllerService()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"screencapture: error"))
+    mock_proc.returncode = 1
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ):
+        with pytest.raises(MacControllerError, match="screencapture: error"):
+            await svc.screenshot()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_timeout() -> None:
+    svc = MacControllerService()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+    mock_proc.kill = lambda: None
+    mock_proc.wait = AsyncMock(return_value=0)
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ):
+        with pytest.raises(MacControllerError, match="timed out"):
+            await svc.screenshot()

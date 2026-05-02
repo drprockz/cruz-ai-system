@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Optional
+from typing import Optional, Tuple
 
 logger = logging.getLogger("cruz.services.mac_controller")
 
@@ -64,6 +64,44 @@ class MacControllerService:
     """All public methods are async. All raise MacControllerError on failure."""
 
     # ── Public primitives ─────────────────────────────────────────────
+
+    async def screenshot(
+        self,
+        region: Optional[Tuple[int, int, int, int]] = None,
+    ) -> bytes:
+        """Capture the screen and return raw PNG bytes.
+
+        region: optional (x, y, width, height) tuple to capture a sub-rectangle.
+                Coordinates are screen pixels; origin top-left.
+        Uses `screencapture` (not osascript) because it natively writes PNG to stdout.
+        """
+        cmd = ["screencapture", "-x", "-t", "png"]
+        if region is not None:
+            x, y, w, h = region
+            cmd += ["-R", f"{x},{y},{w},{h}"]
+        cmd.append("-")  # write to stdout
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=_SUBPROCESS_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise MacControllerError(
+                f"screencapture timed out after {_SUBPROCESS_TIMEOUT}s"
+            )
+
+        if proc.returncode != 0:
+            err = stderr_b.decode("utf-8", errors="replace").strip()
+            raise MacControllerError(err or "screencapture returned non-zero")
+
+        return stdout_b
 
     async def clipboard_read(self) -> str:
         """Return the current clipboard contents as text. Empty clipboard → ''."""

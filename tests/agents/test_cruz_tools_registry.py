@@ -26,6 +26,16 @@ _BUILTIN_TOOLS = {
     "mac_notify",
 }
 
+# Dispatcher-style tools: routed via _TOOL_AGENT_MAP but use structured
+# context (not a free-text `task` string). They inject `tool_name` into
+# context["tool"] so the agent can route by operation. The `task` property
+# is intentionally absent from their input_schema.
+_DISPATCHER_TOOLS = {
+    "calendar_create_event",
+    "calendar_list_events",
+    "calendar_find_free_slot",
+}
+
 
 class TestCruzToolRegistryConsistency:
     def test_every_mapped_agent_is_advertised(self):
@@ -68,6 +78,8 @@ class TestCruzToolRegistryConsistency:
         Delegated tools (those routed via _TOOL_AGENT_MAP) must additionally
         expose a `task` property — CruzAgent._dispatch_tool reads it. Built-in
         tools handled inline by CruzAgent may declare their own schema.
+        Dispatcher-style tools (e.g. calendar_*) use structured context and
+        are exempt from the `task` requirement.
         """
         for tool in CRUZ_TOOLS:
             assert "name" in tool, f"tool missing name: {tool}"
@@ -79,6 +91,8 @@ class TestCruzToolRegistryConsistency:
             )
             if tool["name"] in _BUILTIN_TOOLS:
                 continue
+            if tool["name"] in _DISPATCHER_TOOLS:
+                continue
             props = schema.get("properties", {})
             assert "task" in props, (
                 f"{tool['name']}.input_schema.properties.task missing — "
@@ -86,7 +100,11 @@ class TestCruzToolRegistryConsistency:
             )
 
     def test_tool_count_matches_agent_count(self):
-        """Simple quantitative guard — delegated tools must mirror _TOOL_AGENT_MAP."""
+        """Simple quantitative guard — delegated tools must mirror _TOOL_AGENT_MAP.
+
+        Dispatcher-style tools (calendar_*) count as delegated: they ARE in
+        _TOOL_AGENT_MAP even though they use structured context instead of `task`.
+        """
         delegated = [t for t in CRUZ_TOOLS if t["name"] not in _BUILTIN_TOOLS]
         assert len(delegated) == len(_TOOL_AGENT_MAP), (
             f"CRUZ_TOOLS has {len(delegated)} delegated entries but "
@@ -130,3 +148,32 @@ def test_mac_screenshot_schema_has_optional_region() -> None:
     schema = tool["input_schema"]
     assert "region" in schema["properties"]
     assert schema["properties"]["region"]["type"] == "array"
+
+
+def test_calendar_tools_present() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    names = {t["name"] for t in CRUZ_TOOLS}
+    assert {"calendar_create_event", "calendar_list_events", "calendar_find_free_slot"} <= names
+
+
+def test_calendar_create_event_schema() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    tool = next(t for t in CRUZ_TOOLS if t["name"] == "calendar_create_event")
+    schema = tool["input_schema"]
+    assert {"title", "start_iso", "end_iso"} <= set(schema["required"])
+    assert "attendees" in schema["properties"]
+    assert schema["properties"]["attendees"]["type"] == "array"
+
+
+def test_calendar_find_free_slot_schema() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    tool = next(t for t in CRUZ_TOOLS if t["name"] == "calendar_find_free_slot")
+    schema = tool["input_schema"]
+    assert {"duration_minutes", "earliest_iso", "latest_iso"} <= set(schema["required"])
+
+
+def test_calendar_in_tool_agent_map() -> None:
+    from agents.cruz.cruz_agent import _TOOL_AGENT_MAP
+    from agents.calendar.calendar_agent import CalendarAgent
+    for tool in ("calendar_create_event", "calendar_list_events", "calendar_find_free_slot"):
+        assert _TOOL_AGENT_MAP[tool] is CalendarAgent

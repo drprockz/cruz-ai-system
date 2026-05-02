@@ -38,6 +38,7 @@ from agents.titan.titan_agent import TitanAgent
 from agents.mark.mark_agent import MarkAgent
 from agents.raw.raw_agent import RawAgent
 from agents.pulse.pulse_agent import PulseAgent
+from agents.calendar.calendar_agent import CalendarAgent
 from agents.relay.relay_agent import classify
 from services.alerts import get_alert_service
 from services.conversation import ConversationService
@@ -380,6 +381,63 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["title", "body"],
         },
     },
+    # ── Calendar (Layer 2 — agents/calendar/calendar_agent.py) ────────
+    {
+        "name": "calendar_create_event",
+        "description": (
+            "Create a calendar event in Google Calendar (auto-mirrors to Calendar.app). "
+            "Self-only events (no attendees) are created immediately. "
+            "Events with attendees require user approval before sending invites."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title":       {"type": "string"},
+                "start_iso":   {"type": "string",
+                                "description": "ISO 8601 datetime, e.g. 2026-05-01T10:00:00"},
+                "end_iso":     {"type": "string"},
+                "attendees":   {"type": "array", "items": {"type": "string"},
+                                "description": "Optional list of attendee email addresses."},
+                "description": {"type": "string"},
+                "location":    {"type": "string"},
+                "calendar_id": {"type": "string",
+                                "description": "Optional non-primary calendar ID."},
+            },
+            "required": ["title", "start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "calendar_list_events",
+        "description": "List Google Calendar events in a time range. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso":   {"type": "string"},
+                "end_iso":     {"type": "string"},
+                "calendar_id": {"type": "string"},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "calendar_find_free_slot",
+        "description": (
+            "Find the first free slot of `duration_minutes` in [earliest_iso, latest_iso]. "
+            "Reads busy events from Google Calendar. Read-only — does not create anything."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "duration_minutes": {"type": "integer", "minimum": 5},
+                "earliest_iso":     {"type": "string"},
+                "latest_iso":       {"type": "string"},
+                "working_hours":    {"type": "array", "items": {"type": "integer"},
+                                     "minItems": 2, "maxItems": 2,
+                                     "description": "Optional [start_hour, end_hour], 24h."},
+            },
+            "required": ["duration_minutes", "earliest_iso", "latest_iso"],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -396,6 +454,9 @@ _TOOL_AGENT_MAP: Dict[str, Any] = {
     "mark": MarkAgent,
     "raw": RawAgent,
     "pulse": PulseAgent,
+    "calendar_create_event":   CalendarAgent,
+    "calendar_list_events":    CalendarAgent,
+    "calendar_find_free_slot": CalendarAgent,
 }
 
 
@@ -779,9 +840,13 @@ class CruzAgent(BaseAgent):
             )
 
         specialist_agent = agent_cls()
+        # Inject tool name into context so dispatcher-style agents (Calendar)
+        # know which operation to run. Existing agents ignore the extra key.
+        context: Dict[str, Any] = dict(tool_input)
+        context["tool"] = tool_name
         agent_input: AgentInput = {
             "task": tool_input.get("task", ""),
-            "context": tool_input,
+            "context": context,
             "trace_id": trace_id,
             "conversation_id": conversation_id,
         }

@@ -27,7 +27,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.gcal import GCalError, get_gcal_service
 from services.knowledge_base import get_kb_service
-from services.mac_controller import MacControllerError, get_mac_controller_service
+from services.mac_controller import (  # noqa: F401 — used in Task 15 (_create_event)
+    MacControllerError,
+    get_mac_controller_service,
+)
 
 logger = logging.getLogger("cruz.agents.CALENDAR")
 

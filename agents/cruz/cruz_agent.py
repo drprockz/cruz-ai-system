@@ -304,6 +304,81 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["agent_name", "interaction_type", "observed_pattern"],
         },
     },
+    # ── Mac Controller (Layer 2 — services/mac_controller.py) ─────────
+    {
+        "name": "mac_screenshot",
+        "description": (
+            "Capture the screen on the Mac Mini and return PNG bytes. "
+            "Optional region [x, y, width, height] in screen pixels. "
+            "Use for 'what's on my screen' or grabbing visual context for vision tasks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "description": "Optional [x, y, width, height] sub-rectangle.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "mac_clipboard_read",
+        "description": "Read the current macOS clipboard contents as text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "mac_clipboard_write",
+        "description": (
+            "Replace the macOS clipboard with the given text. "
+            "Use for 'copy this for me' or staging text the user will paste."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to place on the clipboard."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "mac_open_app",
+        "description": (
+            "Launch (or bring to front) a macOS app by name. "
+            "Examples: 'TextEdit', 'Visual Studio Code', 'Mail'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact app name as it appears in /Applications."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mac_notify",
+        "description": (
+            "Fire a macOS Notification Center banner. "
+            "Use for reminders, soft alerts, or confirming background work."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body":  {"type": "string"},
+                "sound": {"type": "boolean", "description": "Play Submarine sound (default false)."},
+            },
+            "required": ["title", "body"],
+        },
+    },
 ]
 
 # Map tool name → agent class

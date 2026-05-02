@@ -16,7 +16,15 @@ from agents.cruz.cruz_agent import CRUZ_TOOLS, _TOOL_AGENT_MAP
 # Built-in CRUZ tools handled inline (not delegated to a specialist agent).
 # These are advertised in CRUZ_TOOLS but intentionally absent from
 # _TOOL_AGENT_MAP — CruzAgent.process() dispatches them directly.
-_BUILTIN_TOOLS = {"record_pattern_observation"}
+# Mac Controller tools (Task 7) are service-level; dispatch wired in Task 8.
+_BUILTIN_TOOLS = {
+    "record_pattern_observation",
+    "mac_screenshot",
+    "mac_clipboard_read",
+    "mac_clipboard_write",
+    "mac_open_app",
+    "mac_notify",
+}
 
 
 class TestCruzToolRegistryConsistency:
@@ -84,3 +92,41 @@ class TestCruzToolRegistryConsistency:
             f"CRUZ_TOOLS has {len(delegated)} delegated entries but "
             f"_TOOL_AGENT_MAP has {len(_TOOL_AGENT_MAP)} — they must be kept in sync."
         )
+
+
+def test_mac_controller_tools_present() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    names = {t["name"] for t in CRUZ_TOOLS}
+    expected = {
+        "mac_screenshot",
+        "mac_clipboard_read",
+        "mac_clipboard_write",
+        "mac_open_app",
+        "mac_notify",
+    }
+    assert expected <= names, f"missing mac tools: {expected - names}"
+
+
+def test_mac_clipboard_write_schema_requires_text() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    tool = next(t for t in CRUZ_TOOLS if t["name"] == "mac_clipboard_write")
+    schema = tool["input_schema"]
+    assert "text" in schema["required"]
+    assert schema["properties"]["text"]["type"] == "string"
+
+
+def test_mac_notify_schema_has_optional_sound() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    tool = next(t for t in CRUZ_TOOLS if t["name"] == "mac_notify")
+    schema = tool["input_schema"]
+    assert {"title", "body"} <= set(schema["required"])
+    assert "sound" not in schema["required"]
+    assert schema["properties"]["sound"]["type"] == "boolean"
+
+
+def test_mac_screenshot_schema_has_optional_region() -> None:
+    from agents.cruz.cruz_agent import CRUZ_TOOLS
+    tool = next(t for t in CRUZ_TOOLS if t["name"] == "mac_screenshot")
+    schema = tool["input_schema"]
+    assert "region" in schema["properties"]
+    assert schema["properties"]["region"]["type"] == "array"

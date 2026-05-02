@@ -44,6 +44,7 @@ from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
 from services.knowledge_base import get_kb_service
+from services.mac_controller import MacControllerError, get_mac_controller_service
 from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
@@ -757,6 +758,10 @@ class CruzAgent(BaseAgent):
 
         Returns an error AgentOutput if the tool name is unrecognised.
         """
+        # ── Mac Controller dispatch (services, not agents) ─────────────
+        if tool_name.startswith("mac_"):
+            return await self._dispatch_mac_tool(tool_name, tool_input, trace_id)
+
         agent_cls = _TOOL_AGENT_MAP.get(tool_name)
         if agent_cls is None:
             logger.warning(
@@ -781,6 +786,68 @@ class CruzAgent(BaseAgent):
             "conversation_id": conversation_id,
         }
         return await specialist_agent.process(agent_input)
+
+    async def _dispatch_mac_tool(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        trace_id: str,
+    ) -> AgentOutput:
+        """Route mac_* tools directly to MacControllerService."""
+        import time as _time
+        start = _time.monotonic()
+        mac = get_mac_controller_service()
+        try:
+            if tool_name == "mac_screenshot":
+                region = tool_input.get("region")
+                region_t = tuple(region) if region else None
+                png = await mac.screenshot(region=region_t)
+                result: Any = {
+                    "bytes_len": len(png),
+                    "mime_type": "image/png",
+                    # Note: raw bytes are NOT included in result to keep
+                    # tool_result text size manageable. Caller (e.g. SP6)
+                    # invokes mac.screenshot() directly when bytes are needed.
+                }
+            elif tool_name == "mac_clipboard_read":
+                result = await mac.clipboard_read()
+            elif tool_name == "mac_clipboard_write":
+                await mac.clipboard_write(tool_input["text"])
+                result = {"written": True, "chars": len(tool_input["text"])}
+            elif tool_name == "mac_open_app":
+                await mac.open_app(tool_input["name"])
+                result = {"opened": tool_input["name"]}
+            elif tool_name == "mac_notify":
+                await mac.notify(
+                    tool_input["title"],
+                    tool_input["body"],
+                    sound=tool_input.get("sound", False),
+                )
+                result = {"notified": True}
+            else:
+                return AgentOutput(
+                    success=False, result=None, agent=self.name,
+                    duration_ms=int((_time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=f"Unknown mac tool: {tool_name!r}",
+                    requires_approval=False, approval_prompt=None,
+                )
+        except MacControllerError as exc:
+            return AgentOutput(
+                success=False, result=None, agent=self.name,
+                duration_ms=int((_time.monotonic() - start) * 1000),
+                tokens_used=0,
+                error=str(exc),
+                requires_approval=False, approval_prompt=None,
+            )
+
+        return AgentOutput(
+            success=True, result=result, agent=self.name,
+            duration_ms=int((_time.monotonic() - start) * 1000),
+            tokens_used=0,
+            error=None,
+            requires_approval=False, approval_prompt=None,
+        )
 
     async def stream_response(
         self,

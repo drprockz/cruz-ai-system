@@ -426,17 +426,17 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
         "name": "calendar_find_free_slot",
         "description": (
             "Find the first free slot of `duration_minutes` in [earliest_iso, latest_iso]. "
-            "Reads busy events from Google Calendar. Read-only — does not create anything."
+            "Reads busy events from Google Calendar. Read-only — does not create anything. "
+            "Caller controls working hours by clamping earliest_iso/latest_iso to the desired window."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "duration_minutes": {"type": "integer", "minimum": 5},
-                "earliest_iso":     {"type": "string"},
-                "latest_iso":       {"type": "string"},
-                "working_hours":    {"type": "array", "items": {"type": "integer"},
-                                     "minItems": 2, "maxItems": 2,
-                                     "description": "Optional [start_hour, end_hour], 24h."},
+                "earliest_iso":     {"type": "string",
+                                     "description": "ISO 8601 datetime, inclusive lower bound of search window."},
+                "latest_iso":       {"type": "string",
+                                     "description": "ISO 8601 datetime, exclusive upper bound of search window."},
             },
             "required": ["duration_minutes", "earliest_iso", "latest_iso"],
         },

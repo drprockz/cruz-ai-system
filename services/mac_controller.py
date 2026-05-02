@@ -162,6 +162,12 @@ class MacControllerService:
         Internal helper used by the Calendar agent for the AppleScript
         mirror of Google Calendar events. NOT a CRUZ tool.
 
+        `calendar_name` always defaults to "Calendar" because there is no
+        corresponding parameter on the `calendar_create_event` CRUZ tool —
+        users with multiple local calendars and a desire to target a
+        specific one would need a future tool-schema change. SP3 scope
+        keeps this targeted at the default Calendar.app calendar only.
+
         start_iso / end_iso must be ISO 8601 with seconds (e.g. 2026-05-01T10:00:00).
         Calendar.app requires AppleScript date literals — we build them with
         `date "<MM/DD/YYYY HH:MM:SS>"` form which AppleScript parses unambiguously.

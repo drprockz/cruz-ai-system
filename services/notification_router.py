@@ -36,7 +36,7 @@ class NotificationRouter:
         self._channels: list[Channel] = []
 
     def register(self, channel: Channel) -> None:
-        """Add a channel. Idempotent on `channel.name`."""
+        """Replaces any existing channel with the same `name` and emits a warning."""
         if any(c.name == channel.name for c in self._channels):
             logger.warning("channel %s already registered, replacing", channel.name)
             self._channels = [c for c in self._channels if c.name != channel.name]

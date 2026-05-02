@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -74,6 +75,7 @@ async def test_route_calls_all_matching_channels(router):
 
 @pytest.mark.asyncio
 async def test_failing_channel_does_not_block_others(router, caplog):
+    caplog.set_level(logging.WARNING, logger="cruz.services.notification_router")
     fail = FailingChannel()
     ok = FakeChannel("ok", {"warn"})
     router.register(fail)
@@ -88,7 +90,6 @@ async def test_register_same_name_replaces_existing(router, caplog):
     """Idempotent registration: re-registering by the same name swaps in
     the new instance (only it receives subsequent route() calls) and
     emits a warning so accidental double-registers are visible."""
-    import logging
     caplog.set_level(logging.WARNING, logger="cruz.services.notification_router")
     first = FakeChannel("dup", {"warn"})
     second = FakeChannel("dup", {"warn"})

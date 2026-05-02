@@ -10,7 +10,6 @@ all use TestClient for the same reason.
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.main import app
@@ -29,6 +28,7 @@ def test_false_alarm_records_state_for_agent_and_dedup_key():
 
 
 def test_false_alarm_rejects_missing_fields():
+    """Test that omitting required fields returns 422 Unprocessable Entity."""
     with TestClient(app) as client:
         resp = client.post("/notifications/false-alarm", json={"agent": "x"})
     assert resp.status_code in (400, 422)

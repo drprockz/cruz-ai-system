@@ -772,6 +772,68 @@ async def webhook_google_calendar(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"queued": True})
 
 
+# ─── Gmail Pub/Sub push receiver (SP5) ──────────────────────────────────────
+
+import base64
+
+# google-auth comes in transitively via google-api-python-client (already
+# in v1 for Calendar). If it's not installed in this env, requirements
+# need google-auth>=2.0.
+try:
+    from google.oauth2 import id_token as _g_id_token
+    from google.auth.transport import requests as _g_requests
+    _GOOGLE_AUTH_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _GOOGLE_AUTH_AVAILABLE = False
+
+
+def _verify_pubsub_jwt(token: str) -> Optional[dict]:
+    """Verify a Pub/Sub OIDC token. Returns the decoded claims dict on
+    success, None on failure. See Google docs:
+      https://cloud.google.com/pubsub/docs/push#authentication
+    """
+    if not _GOOGLE_AUTH_AVAILABLE:
+        return None
+    audience = os.environ.get("GMAIL_PUBSUB_AUDIENCE", "")
+    expected_email = os.environ.get("GMAIL_PUBSUB_SERVICE_ACCOUNT", "")
+    if not audience:
+        return None
+    try:
+        claims = _g_id_token.verify_oauth2_token(
+            token, _g_requests.Request(), audience=audience,
+        )
+        if expected_email and claims.get("email") != expected_email:
+            return None
+        return claims
+    except Exception:
+        return None
+
+
+@app.post("/webhooks/gmail")
+async def webhook_gmail(request: Request) -> JSONResponse:
+    """Pub/Sub push receiver for Gmail watch notifications.
+
+    Spec: docs/superpowers/specs/2026-04-26-sp5-event-loop-design.md §3.5
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = auth.split(None, 1)[1].strip()
+    claims = _verify_pubsub_jwt(token)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="invalid pubsub jwt")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json")
+
+    pubsub_message = (body or {}).get("message", {})
+    pool = await get_arq_pool()
+    await pool.enqueue_job("process_gmail_webhook", pubsub_message)
+    return JSONResponse(status_code=200, content={"queued": True})
+
+
 # ---------------------------------------------------------------------------
 # POST /voice/token — mint a short-lived LiveKit JWT for a voice session
 # ---------------------------------------------------------------------------

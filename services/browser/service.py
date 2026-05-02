@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import time
 import urllib.parse
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -20,6 +21,12 @@ from services.browser.errors import (
     BrowserProfileError,
     BrowserTimeoutError,
     BrowserNavigationError,
+    BrowserRateLimited,
+)
+from services.browser.rate_limit import (
+    TokenBucketSpec,
+    _DEFAULT_BUCKET,
+    _parse_rate_limit_env,
 )
 from services.browser.parsers import (
     PageResult,
@@ -70,6 +77,10 @@ class BrowserService:
         self._contexts: dict[str, object] = {}
         self._context_locks: dict[str, asyncio.Lock] = {}
         self._init_lock = asyncio.Lock()
+        self._buckets: dict[str, tuple[float, float]] = {}  # domain -> (tokens, last_refill_ts)
+        self._rate_limit_policy: dict[str, TokenBucketSpec] = _parse_rate_limit_env(
+            os.environ.get("CRUZ_BROWSER_RATE_LIMITS", "")
+        )
 
     async def _ensure_playwright(self) -> None:
         """Lazy-start the Playwright runtime. Idempotent, concurrency-safe."""
@@ -109,6 +120,19 @@ class BrowserService:
             return
         await asyncio.sleep(random.uniform(1.0, 3.0))
 
+    def _consume_token(self, domain: str) -> None:
+        """Consume one token for `domain`. Raises BrowserRateLimited on exhaustion."""
+        spec = self._rate_limit_policy.get(domain, _DEFAULT_BUCKET)
+        now = time.monotonic()
+        tokens, last_ts = self._buckets.get(domain, (float(spec.capacity), now))
+        elapsed = now - last_ts
+        tokens = min(spec.capacity, tokens + elapsed * spec.refill_per_sec)
+        if tokens < 1.0:
+            retry_after_ms = int(((1.0 - tokens) / spec.refill_per_sec) * 1000)
+            self._buckets[domain] = (tokens, now)
+            raise BrowserRateLimited(domain=domain, retry_after_ms=retry_after_ms)
+        self._buckets[domain] = (tokens - 1.0, now)
+
     async def search(
         self,
         query: str,
@@ -122,6 +146,7 @@ class BrowserService:
         if engine != "duckduckgo":
             raise BrowserError(f"unsupported engine: {engine}")
         await self._pace()
+        self._consume_token("duckduckgo.com")
         ctx = await self._get_context(profile)
         page = await ctx.new_page()
         try:
@@ -150,6 +175,7 @@ class BrowserService:
         from playwright.async_api import TimeoutError as PWTimeout, Error as PWError
 
         await self._pace()
+        self._consume_token(urllib.parse.urlparse(url).netloc)
         ctx = await self._get_context(profile)
         page = await ctx.new_page()
         try:
@@ -232,6 +258,7 @@ class BrowserService:
     ) -> bytes:
         """Navigate to URL and return a PNG screenshot."""
         await self._pace()
+        self._consume_token(urllib.parse.urlparse(url).netloc)
         ctx = await self._get_context(profile)
         page = await ctx.new_page()
         try:
@@ -253,6 +280,7 @@ class BrowserService:
     ) -> Path:
         """Download a binary URL via Playwright's APIRequestContext; write to disk."""
         await self._pace()
+        self._consume_token(urllib.parse.urlparse(url).netloc)
         ctx = await self._get_context(profile)
         resp = await ctx.request.get(url)
         if resp.status >= 400:

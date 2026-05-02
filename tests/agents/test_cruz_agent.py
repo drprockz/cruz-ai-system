@@ -483,3 +483,118 @@ class TestCruzKnowledgeBase:
     def test_record_pattern_observation_in_tools_list(self):
         names = [t["name"] for t in CRUZ_TOOLS]
         assert "record_pattern_observation" in names
+
+
+class TestCruzBrowserTools(TestCruzAgentToolUse):
+    """Tests for the web_search and fetch_url built-in tools."""
+
+    def _make_text_response(self, text: str) -> MagicMock:
+        mock_msg = MagicMock()
+        mock_msg.stop_reason = "end_turn"
+        mock_msg.content = [MagicMock(type="text", text=text)]
+        mock_msg.usage = MagicMock(input_tokens=100, output_tokens=50)
+        return mock_msg
+
+    def _make_claude_client(self, response: MagicMock) -> MagicMock:
+        client = MagicMock()
+        client.messages = MagicMock()
+        client.messages.create = AsyncMock(return_value=response)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_cruz_web_search_tool_dispatch(self, monkeypatch):
+        """When Claude calls web_search, CRUZ invokes BrowserService.search()
+        and feeds formatted results back into the loop."""
+        from agents.cruz.cruz_agent import CruzAgent
+        import services.browser.service as browser_mod
+
+        fake_browser = MagicMock()
+        fake_browser.search = AsyncMock(return_value=[
+            {"title": "Result A", "url": "https://a.com",
+             "snippet": "snip", "rank": 1},
+        ])
+        monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+        # First Claude call: emit a web_search tool_use.
+        # Second Claude call: emit final text after seeing the tool_result.
+        client = self._make_claude_client(
+            self._make_tool_use_response("web_search", {"query": "anthropic", "limit": 5})
+        )
+        client.messages.create.side_effect = [
+            self._make_tool_use_response("web_search", {"query": "anthropic", "limit": 5}),
+            self._make_text_response("Anthropic just released Claude 5."),
+        ]
+
+        agent = CruzAgent()
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
+            result = await agent.process({
+                "task": "what's new with Anthropic?",
+                "context": {},
+                "trace_id": "t1",
+                "conversation_id": "c1",
+            })
+        fake_browser.search.assert_awaited_with(
+            "anthropic", limit=5, trace_id="t1",
+        )
+        assert result["success"]
+        assert "Claude 5" in (result["result"] or "")
+
+    @pytest.mark.asyncio
+    async def test_cruz_fetch_url_tool_dispatch(self, monkeypatch):
+        from agents.cruz.cruz_agent import CruzAgent
+        import services.browser.service as browser_mod
+
+        fake_browser = MagicMock()
+        fake_browser.extract_text = AsyncMock(return_value="page contents")
+        monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+        client = self._make_claude_client(
+            self._make_tool_use_response("fetch_url", {"url": "https://example.com"})
+        )
+        client.messages.create.side_effect = [
+            self._make_tool_use_response("fetch_url", {"url": "https://example.com"}),
+            self._make_text_response("the page says: page contents"),
+        ]
+
+        agent = CruzAgent()
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
+            result = await agent.process({
+                "task": "read https://example.com",
+                "context": {},
+                "trace_id": "t1",
+                "conversation_id": "c1",
+            })
+        fake_browser.extract_text.assert_awaited_with(
+            "https://example.com", trace_id="t1",
+        )
+        assert result["success"]
+
+    @pytest.mark.asyncio
+    async def test_cruz_web_search_captcha_surfaces_as_text(self, monkeypatch):
+        """When BrowserService raises BrowserCaptchaDetected, CRUZ feeds a
+        readable error string back to Claude — conversation does not crash."""
+        from agents.cruz.cruz_agent import CruzAgent
+        from services.browser import BrowserCaptchaDetected
+        import services.browser.service as browser_mod
+
+        fake_browser = MagicMock()
+        fake_browser.search = AsyncMock(
+            side_effect=BrowserCaptchaDetected(url="https://x.com", kind="recaptcha")
+        )
+        monkeypatch.setattr(browser_mod, "_instance", fake_browser)
+
+        client = self._make_claude_client(
+            self._make_tool_use_response("web_search", {"query": "x", "limit": 5})
+        )
+        client.messages.create.side_effect = [
+            self._make_tool_use_response("web_search", {"query": "x", "limit": 5}),
+            self._make_text_response("looks like that page is captcha-walled."),
+        ]
+
+        agent = CruzAgent()
+        with patch("agents.cruz.cruz_agent.llm_chat", new=client.messages.create):
+            result = await agent.process({
+                "task": "find x", "context": {},
+                "trace_id": "t1", "conversation_id": "c1",
+            })
+        assert result["success"]

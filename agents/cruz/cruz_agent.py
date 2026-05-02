@@ -304,6 +304,39 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["agent_name", "interaction_type", "observed_pattern"],
         },
     },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the live web. Use when the user asks about current events, "
+            "recent releases, or anything past your training cutoff. "
+            "Returns top results with title, URL, and snippet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": (
+            "Fetch the readable text of a web page by URL. Use as a follow-up to "
+            "web_search when you need the actual contents of a result, not just "
+            "its snippet. Returns plain text, trimmed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "max_chars": {"type": "integer", "default": 8000,
+                              "minimum": 500, "maximum": 30000},
+            },
+            "required": ["url"],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -575,6 +608,66 @@ class CruzAgent(BaseAgent):
                                     "content": str({"recorded": True}),
                                 }
                             )
+                            continue
+
+                        # ── Built-in tool: web_search ─────────────────────
+                        if block.name == "web_search":
+                            from services.browser import (
+                                get_browser_service,
+                                BrowserCaptchaDetected,
+                                BrowserRateLimited,
+                                BrowserError,
+                            )
+                            ti = block.input or {}
+                            q = ti.get("query", "")
+                            lim = int(ti.get("limit", 5))
+                            try:
+                                results = await get_browser_service().search(
+                                    q, limit=lim, trace_id=input["trace_id"],
+                                )
+                                if not results:
+                                    tool_text = f"web_search returned no results for {q!r}."
+                                else:
+                                    tool_text = "\n".join(
+                                        f"{r['rank']}. {r['title']} — {r['url']}\n   {r['snippet']}"
+                                        for r in results
+                                    )
+                            except BrowserCaptchaDetected as exc:
+                                tool_text = f"web_search blocked: {exc.kind} on {exc.url}"
+                            except BrowserRateLimited as exc:
+                                tool_text = f"web_search rate-limited at {exc.domain}"
+                            except BrowserError as exc:
+                                tool_text = f"web_search failed: {exc}"
+                            tool_results.append({
+                                "type": "tool_result", "tool_use_id": block.id, "content": tool_text,
+                            })
+                            continue
+
+                        # ── Built-in tool: fetch_url ──────────────────────
+                        if block.name == "fetch_url":
+                            from services.browser import (
+                                get_browser_service,
+                                BrowserCaptchaDetected,
+                                BrowserRateLimited,
+                                BrowserError,
+                            )
+                            ti = block.input or {}
+                            url = ti.get("url", "")
+                            max_chars = int(ti.get("max_chars", 8000))
+                            try:
+                                text = await get_browser_service().extract_text(
+                                    url, trace_id=input["trace_id"],
+                                )
+                                tool_text = text[:max_chars]
+                            except BrowserCaptchaDetected as exc:
+                                tool_text = f"fetch_url blocked: {exc.kind} on {exc.url}"
+                            except BrowserRateLimited as exc:
+                                tool_text = f"fetch_url rate-limited at {exc.domain}"
+                            except BrowserError as exc:
+                                tool_text = f"fetch_url failed: {exc}"
+                            tool_results.append({
+                                "type": "tool_result", "tool_use_id": block.id, "content": tool_text,
+                            })
                             continue
 
                         agent_output = await self._dispatch_tool(

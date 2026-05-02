@@ -275,3 +275,37 @@ async def test_session_yields_page(monkeypatch):
     async with svc.session(profile="default") as page:
         assert page is fake_page
     fake_page.close.assert_awaited()
+
+
+# --- Task 3.3: agent_logs write-through ---
+
+
+@pytest.mark.asyncio
+async def test_search_logs_to_agent_logs(monkeypatch):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fixture_html = (FIXTURE_DIR / "ddg_search_cruz_ai.html").read_text()
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock()
+    fake_page.content = AsyncMock(return_value=fixture_html)
+    fake_page.url = "https://duckduckgo.com/html/?q=cruz+ai"
+    fake_page.close = AsyncMock()
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    fake_db = MagicMock()
+    fake_db.execute = AsyncMock()
+    monkeypatch.setattr(browser_mod, "get_db_service", lambda: fake_db)
+
+    await svc.search("cruz ai", limit=3, trace_id="t1")
+
+    # One agent_logs row was written
+    fake_db.execute.assert_awaited()
+    args = fake_db.execute.await_args.args
+    sql = args[0].lower() if args else ""
+    assert "insert into agent_logs" in sql
+    # action is 'search', agent is 'browser_service'
+    assert "browser_service" in str(args)

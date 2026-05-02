@@ -6,6 +6,7 @@ escape hatch. Singleton via get_browser_service().
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -16,6 +17,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, List, Optional
 
+from services.db import get_db_service
 from services.browser.errors import (
     BrowserError,
     BrowserProfileError,
@@ -135,6 +137,37 @@ class BrowserService:
             raise BrowserRateLimited(domain=domain, retry_after_ms=retry_after_ms)
         self._buckets[domain] = (tokens - 1.0, now)
 
+    async def _log_call(
+        self,
+        *,
+        action: str,
+        status: str,
+        duration_ms: int,
+        input_data: dict,
+        output_data: dict,
+        trace_id: str,
+    ) -> None:
+        """Write one agent_logs row with agent='browser_service'. Non-fatal."""
+        try:
+            db = get_db_service()
+            await db.execute(
+                """
+                INSERT INTO agent_logs (
+                    id, trace_id, agent, action, status,
+                    input_data, output_data, tokens_used, duration_ms, created_at
+                ) VALUES (gen_random_uuid(), $1, 'browser_service', $2, $3,
+                          $4::jsonb, $5::jsonb, NULL, $6, NOW())
+                """,
+                trace_id or "",
+                action,
+                status,
+                json.dumps(input_data),
+                json.dumps(output_data),
+                duration_ms,
+            )
+        except Exception as exc:
+            logger.warning("[%s] browser _log_call failed (non-fatal): %s", trace_id, exc)
+
     async def search(
         self,
         query: str,
@@ -145,23 +178,47 @@ class BrowserService:
         trace_id: str = "",
     ) -> List[SearchResult]:
         """Run a web search; return top-N results."""
-        if engine != "duckduckgo":
-            raise BrowserError(f"unsupported engine: {engine}")
-        await self._pace()
-        self._consume_token("duckduckgo.com")
-        ctx = await self._get_context(profile)
-        page = await ctx.new_page()
+        start = time.monotonic()
+        status = "success"
+        result_count = 0
+        reason: Optional[str] = None
         try:
-            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            html = await page.content()
-            results = _parse_ddg_html(html)[:limit]
-            return results
-        finally:
+            if engine != "duckduckgo":
+                raise BrowserError(f"unsupported engine: {engine}")
+            await self._pace()
+            self._consume_token("duckduckgo.com")
+            ctx = await self._get_context(profile)
+            page = await ctx.new_page()
             try:
-                await page.close()
-            except Exception:
-                pass
+                url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                html = await page.content()
+                results = _parse_ddg_html(html)[:limit]
+                result_count = len(results)
+                if not results:
+                    status = "degraded"
+                    reason = "ddg_zero_results"
+                return results
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        except BrowserError:
+            status = "error"
+            raise
+        finally:
+            output_data: dict = {"result_count": result_count}
+            if reason is not None:
+                output_data["reason"] = reason
+            await self._log_call(
+                action="search",
+                status=status,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                input_data={"query": query[:100], "limit": limit, "profile": profile},
+                output_data=output_data,
+                trace_id=trace_id,
+            )
 
     async def fetch(
         self,
@@ -176,58 +233,88 @@ class BrowserService:
         """Fetch a URL; render JS by default; return rendered html + text."""
         from playwright.async_api import TimeoutError as PWTimeout, Error as PWError
 
-        await self._pace()
-        self._consume_token(urllib.parse.urlparse(url).netloc)
-        ctx = await self._get_context(profile)
-        page = await ctx.new_page()
+        start = time.monotonic()
+        log_status = "success"
+        page_result: Optional[PageResult] = None
         try:
-            attempt = 0
-            last_exc: Optional[BaseException] = None
-            while attempt < 2:
-                try:
-                    wait_until = "domcontentloaded" if not render_js else "networkidle"
-                    resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
-                    if wait_for:
-                        await page.wait_for_selector(wait_for, timeout=timeout_ms)
-                    # Inter-fetch jitter
-                    if not BROWSER_PACE_DISABLED and wait_for is None:
-                        await asyncio.sleep(random.uniform(0.5, 1.5))
-                    html = await page.content()
-                    kind = _detect_captcha(html, url)
-                    if kind is not None:
-                        raise BrowserCaptchaDetected(url=url, kind=kind)
-                    title = await page.title()
-                    text = await page.evaluate("document.body ? document.body.innerText : ''")
-                    status = resp.status if resp else 0
-                    if status >= 500:
-                        last_exc = BrowserNavigationError(f"http {status} from {url}")
-                        raise last_exc
-                    return PageResult(
-                        url=url,
-                        final_url=page.url,
-                        status=status,
-                        title=title or "",
-                        html=html,
-                        text=text or "",
-                        byte_size=len(html),
-                    )
-                except PWTimeout as exc:
-                    last_exc = BrowserTimeoutError(f"timeout on {url}: {exc}")
-                except PWError as exc:
-                    last_exc = BrowserNavigationError(f"navigation error on {url}: {exc}")
-                except BrowserNavigationError:
-                    # Already a 5xx — retry
-                    pass
-                attempt += 1
-                if attempt < 2:
-                    await asyncio.sleep(_RETRY_BACKOFF_S)
-            assert last_exc is not None
-            raise last_exc
-        finally:
+            await self._pace()
+            self._consume_token(urllib.parse.urlparse(url).netloc)
+            ctx = await self._get_context(profile)
+            page = await ctx.new_page()
             try:
-                await page.close()
-            except Exception:
-                pass
+                attempt = 0
+                last_exc: Optional[BaseException] = None
+                while attempt < 2:
+                    try:
+                        wait_until = "domcontentloaded" if not render_js else "networkidle"
+                        resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                        if wait_for:
+                            await page.wait_for_selector(wait_for, timeout=timeout_ms)
+                        # Inter-fetch jitter
+                        if not BROWSER_PACE_DISABLED and wait_for is None:
+                            await asyncio.sleep(random.uniform(0.5, 1.5))
+                        html = await page.content()
+                        kind = _detect_captcha(html, url)
+                        if kind is not None:
+                            raise BrowserCaptchaDetected(url=url, kind=kind)
+                        title = await page.title()
+                        text = await page.evaluate("document.body ? document.body.innerText : ''")
+                        status = resp.status if resp else 0
+                        if status >= 500:
+                            last_exc = BrowserNavigationError(f"http {status} from {url}")
+                            raise last_exc
+                        page_result = PageResult(
+                            url=url,
+                            final_url=page.url,
+                            status=status,
+                            title=title or "",
+                            html=html,
+                            text=text or "",
+                            byte_size=len(html),
+                        )
+                        return page_result
+                    except PWTimeout as exc:
+                        last_exc = BrowserTimeoutError(f"timeout on {url}: {exc}")
+                    except PWError as exc:
+                        last_exc = BrowserNavigationError(f"navigation error on {url}: {exc}")
+                    except BrowserNavigationError:
+                        # Already a 5xx — retry
+                        pass
+                    attempt += 1
+                    if attempt < 2:
+                        await asyncio.sleep(_RETRY_BACKOFF_S)
+                assert last_exc is not None
+                raise last_exc
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        except BrowserError:
+            log_status = "error"
+            raise
+        finally:
+            if page_result is None:
+                out: dict = {}
+            else:
+                out = {
+                    "status": page_result["status"],
+                    "byte_size": page_result["byte_size"],
+                    "title": page_result["title"][:200],
+                }
+            await self._log_call(
+                action="fetch",
+                status=log_status,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                input_data={
+                    "url": url,
+                    "timeout_ms": timeout_ms,
+                    "render_js": render_js,
+                    "profile": profile,
+                },
+                output_data=out,
+                trace_id=trace_id,
+            )
 
     async def extract_text(
         self,
@@ -238,20 +325,40 @@ class BrowserService:
         trace_id: str = "",
     ) -> str:
         """Fetch URL and return plain text from the first matching container."""
-        page_result = await self.fetch(url, profile=profile, trace_id=trace_id)
-        if selector:
+        start = time.monotonic()
+        status = "success"
+        text_result: Optional[str] = None
+        try:
+            page_result = await self.fetch(url, profile=profile, trace_id=trace_id)
+            if selector:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(page_result["html"], "html.parser")
+                el = soup.select_one(selector)
+                text_result = el.get_text(" ", strip=True) if el else ""
+                return text_result
+            # Default cascade: <article> → <main> → <body>
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(page_result["html"], "html.parser")
-            el = soup.select_one(selector)
-            return el.get_text(" ", strip=True) if el else ""
-        # Default cascade: <article> → <main> → <body>
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(page_result["html"], "html.parser")
-        for sel in ("article", "main", "body"):
-            el = soup.select_one(sel)
-            if el and el.get_text(strip=True):
-                return el.get_text(" ", strip=True)
-        return page_result["text"]
+            for sel in ("article", "main", "body"):
+                el = soup.select_one(sel)
+                if el and el.get_text(strip=True):
+                    text_result = el.get_text(" ", strip=True)
+                    return text_result
+            text_result = page_result["text"]
+            return text_result
+        except BrowserError:
+            status = "error"
+            raise
+        finally:
+            out = {} if text_result is None else {"text_len": len(text_result)}
+            await self._log_call(
+                action="extract_text",
+                status=status,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                input_data={"url": url, "selector": selector, "profile": profile},
+                output_data=out,
+                trace_id=trace_id,
+            )
 
     async def screenshot(
         self,
@@ -262,18 +369,36 @@ class BrowserService:
         trace_id: str = "",
     ) -> bytes:
         """Navigate to URL and return a PNG screenshot."""
-        await self._pace()
-        self._consume_token(urllib.parse.urlparse(url).netloc)
-        ctx = await self._get_context(profile)
-        page = await ctx.new_page()
+        start = time.monotonic()
+        status = "success"
+        png_bytes: Optional[bytes] = None
         try:
-            await page.goto(url, wait_until="networkidle", timeout=15000)
-            return await page.screenshot(full_page=full_page, type="png")
-        finally:
+            await self._pace()
+            self._consume_token(urllib.parse.urlparse(url).netloc)
+            ctx = await self._get_context(profile)
+            page = await ctx.new_page()
             try:
-                await page.close()
-            except Exception:
-                pass
+                await page.goto(url, wait_until="networkidle", timeout=15000)
+                png_bytes = await page.screenshot(full_page=full_page, type="png")
+                return png_bytes
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        except BrowserError:
+            status = "error"
+            raise
+        finally:
+            out = {} if png_bytes is None else {"byte_size": len(png_bytes)}
+            await self._log_call(
+                action="screenshot",
+                status=status,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                input_data={"url": url, "full_page": full_page, "profile": profile},
+                output_data=out,
+                trace_id=trace_id,
+            )
 
     async def download(
         self,
@@ -284,17 +409,35 @@ class BrowserService:
         trace_id: str = "",
     ) -> Path:
         """Download a binary URL via Playwright's APIRequestContext; write to disk."""
-        await self._pace()
-        self._consume_token(urllib.parse.urlparse(url).netloc)
-        ctx = await self._get_context(profile)
-        resp = await ctx.request.get(url)
-        if resp.status >= 400:
-            raise BrowserNavigationError(f"http {resp.status} from {url}")
-        body = await resp.body()
-        dest = Path(dest_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(body)
-        return dest
+        start = time.monotonic()
+        status = "success"
+        body_len: Optional[int] = None
+        try:
+            await self._pace()
+            self._consume_token(urllib.parse.urlparse(url).netloc)
+            ctx = await self._get_context(profile)
+            resp = await ctx.request.get(url)
+            if resp.status >= 400:
+                raise BrowserNavigationError(f"http {resp.status} from {url}")
+            body = await resp.body()
+            body_len = len(body)
+            dest = Path(dest_path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+            return dest
+        except BrowserError:
+            status = "error"
+            raise
+        finally:
+            out = {} if body_len is None else {"byte_size": body_len}
+            await self._log_call(
+                action="download",
+                status=status,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                input_data={"url": url, "dest_path": dest_path, "profile": profile},
+                output_data=out,
+                trace_id=trace_id,
+            )
 
     @asynccontextmanager
     async def session(
@@ -308,9 +451,18 @@ class BrowserService:
         The page is closed on context exit. Use only when the five primitives
         can't express the interaction you need.
         """
+        start = time.monotonic()
         await self._pace()
         ctx = await self._get_context(profile)
         page = await ctx.new_page()
+        await self._log_call(
+            action="session_open",
+            status="success",
+            duration_ms=int((time.monotonic() - start) * 1000),
+            input_data={"profile": profile},
+            output_data={},
+            trace_id=trace_id,
+        )
         try:
             yield page
         finally:

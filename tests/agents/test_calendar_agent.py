@@ -9,6 +9,7 @@ import pytest
 
 from agents.calendar.calendar_agent import CalendarAgent
 from services.gcal import GCalError
+from services.mac_controller import MacControllerError
 
 
 def _input(task: str, **context):
@@ -206,3 +207,188 @@ async def test_list_events_propagates_gcal_error() -> None:
         ))
     assert out["success"] is False
     assert "401" in out["error"]
+
+
+# ── create_event — self-only auto-create ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_event_self_only_writes_google_and_mirrors() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock(return_value={
+        "id": "ev1", "htmlLink": "https://...", "summary": "Deep work",
+    })
+    fake_mac = MagicMock()
+    fake_mac._calendar_create_local = AsyncMock(return_value=None)
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        out = await agent.process(_input(
+            task="block 10am-12pm tomorrow for AMA",
+            tool="calendar_create_event",
+            title="Deep work",
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T12:00:00",
+        ))
+
+    assert out["success"] is True
+    assert out["requires_approval"] is False
+    assert out["result"]["id"] == "ev1"
+    fake_gcal.create_event.assert_awaited_once()
+    fake_mac._calendar_create_local.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_event_self_only_observes_hour_pattern() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock(return_value={"id": "ev1"})
+    fake_mac = MagicMock()
+    fake_mac._calendar_create_local = AsyncMock()
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        await agent.process(_input(
+            task="block 10am-12pm",
+            tool="calendar_create_event",
+            title="x",
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T12:00:00",
+        ))
+
+    fake_kb.observe_interaction.assert_awaited_once_with(
+        "calendar", "preferred_block_hour", "10",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_event_mirror_failure_is_non_fatal() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock(return_value={"id": "ev1"})
+    fake_mac = MagicMock()
+    fake_mac._calendar_create_local = AsyncMock(
+        side_effect=MacControllerError("Calendar.app not running"),
+    )
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        out = await agent.process(_input(
+            task="block",
+            tool="calendar_create_event",
+            title="x",
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T11:00:00",
+        ))
+
+    assert out["success"] is True  # Google succeeded → call succeeds
+    assert out["result"]["id"] == "ev1"
+    assert out["result"].get("mirror_warning") is not None
+
+
+@pytest.mark.asyncio
+async def test_create_event_google_failure_is_fatal() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock(side_effect=GCalError("quota exceeded"))
+    fake_mac = MagicMock()
+    fake_mac._calendar_create_local = AsyncMock()
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        out = await agent.process(_input(
+            task="block",
+            tool="calendar_create_event",
+            title="x",
+            start_iso="2026-05-01T10:00:00",
+            end_iso="2026-05-01T11:00:00",
+        ))
+
+    assert out["success"] is False
+    assert "quota" in out["error"]
+    fake_mac._calendar_create_local.assert_not_awaited()
+
+
+# ── create_event — attendees → approval gate ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_event_with_attendees_requires_approval_by_default() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock()
+    fake_mac = MagicMock()
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        out = await agent.process(_input(
+            task="set up sync with Acme",
+            tool="calendar_create_event",
+            title="Sync",
+            start_iso="2026-05-01T15:00:00",
+            end_iso="2026-05-01T15:30:00",
+            attendees=["client@acme.com"],
+        ))
+
+    assert out["requires_approval"] is True
+    assert out["success"] is True
+    assert "client@acme.com" in out["approval_prompt"]
+    fake_gcal.create_event.assert_not_awaited()  # nothing sent
+
+
+@pytest.mark.asyncio
+async def test_create_event_with_attendees_send_true_actually_sends() -> None:
+    agent = CalendarAgent()
+    fake_kb = MagicMock()
+    fake_kb.build_agent_context = AsyncMock(return_value="")
+    fake_kb.record_agent_activity = AsyncMock()
+    fake_kb.observe_interaction = AsyncMock()
+    fake_gcal = MagicMock()
+    fake_gcal.create_event = AsyncMock(return_value={"id": "ev2"})
+    fake_mac = MagicMock()
+    fake_mac._calendar_create_local = AsyncMock()
+
+    with patch("agents.calendar.calendar_agent.get_kb_service", return_value=fake_kb), \
+         patch("agents.calendar.calendar_agent.get_gcal_service", return_value=fake_gcal), \
+         patch("agents.calendar.calendar_agent.get_mac_controller_service", return_value=fake_mac):
+        out = await agent.process(_input(
+            task="confirmed — send the invite",
+            tool="calendar_create_event",
+            title="Sync",
+            start_iso="2026-05-01T15:00:00",
+            end_iso="2026-05-01T15:30:00",
+            attendees=["client@acme.com"],
+            send=True,
+        ))
+
+    assert out["requires_approval"] is False
+    assert out["success"] is True
+    fake_gcal.create_event.assert_awaited_once()
+    body_kwargs = fake_gcal.create_event.await_args.kwargs
+    assert body_kwargs["attendees"] == ["client@acme.com"]

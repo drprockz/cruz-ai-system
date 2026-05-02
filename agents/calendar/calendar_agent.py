@@ -27,10 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.gcal import GCalError, get_gcal_service
 from services.knowledge_base import get_kb_service
-from services.mac_controller import (  # noqa: F401 — used in Task 15 (_create_event)
-    MacControllerError,
-    get_mac_controller_service,
-)
+from services.mac_controller import MacControllerError, get_mac_controller_service
 
 logger = logging.getLogger("cruz.agents.CALENDAR")
 
@@ -158,7 +155,90 @@ class CalendarAgent(BaseAgent):
         )
 
     async def _create_event(self, input: AgentInput, start: float) -> AgentOutput:
-        raise NotImplementedError("filled in Task 15")
+        ctx = input["context"]
+        title = ctx["title"]
+        start_iso = ctx["start_iso"]
+        end_iso = ctx["end_iso"]
+        attendees = ctx.get("attendees") or []
+        description = ctx.get("description")
+        location = ctx.get("location")
+        send = bool(ctx.get("send", False))
+
+        # Approval gate — Override #1: only when attendees present.
+        if attendees and not send:
+            preview = {
+                "title": title,
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+                "attendees": attendees,
+            }
+            return AgentOutput(
+                success=True,
+                result=preview,
+                agent=self.name,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                tokens_used=0,
+                error=None,
+                requires_approval=True,
+                approval_prompt=(
+                    f"Send invite to {', '.join(attendees)}?\n"
+                    f"  Title: {title}\n"
+                    f"  When: {start_iso} – {end_iso}\n"
+                    "Reply 'yes' to send or 'no' to discard."
+                ),
+            )
+
+        # Step 1 — Google write (source of truth).
+        gcal = get_gcal_service()
+        try:
+            event = await gcal.create_event(
+                title=title,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                attendees=attendees if attendees else None,
+                description=description,
+                location=location,
+                calendar_id=ctx.get("calendar_id"),
+            )
+        except GCalError as exc:
+            return _failure(self.name, start, str(exc))
+
+        # Step 2 — AppleScript mirror (best-effort).
+        mirror_warning: Optional[str] = None
+        try:
+            mac = get_mac_controller_service()
+            await mac._calendar_create_local(
+                title=title,
+                start_iso=start_iso,
+                end_iso=end_iso,
+            )
+        except MacControllerError as exc:
+            logger.warning(
+                "[%s] Calendar.app mirror failed (non-fatal): %s",
+                input["trace_id"], exc,
+            )
+            mirror_warning = str(exc)
+
+        # Pattern observation — only on self-only successful creates.
+        if not attendees:
+            try:
+                hour = _parse_iso(start_iso).hour
+                await get_kb_service().observe_interaction(
+                    "calendar", "preferred_block_hour", str(hour),
+                )
+            except Exception:
+                pass
+
+        result = dict(event)
+        if mirror_warning is not None:
+            result["mirror_warning"] = mirror_warning
+
+        return AgentOutput(
+            success=True, result=result, agent=self.name,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            tokens_used=0, error=None,
+            requires_approval=False, approval_prompt=None,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────

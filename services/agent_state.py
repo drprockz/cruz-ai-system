@@ -127,5 +127,6 @@ class StateService:
         # asyncpg returns "DELETE <n>" — best-effort parse
         try:
             return int(result.split()[-1]) if result else 0
-        except Exception:
+        except (ValueError, IndexError, AttributeError) as exc:
+            logger.warning("Could not parse asyncpg DELETE result %r: %s", result, exc)
             return 0

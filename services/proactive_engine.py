@@ -47,5 +47,5 @@ class GateRequest:
     severity: Literal["info", "warn", "critical"]
     reason_code: Optional[str]
     dedup_key: str
-    payload: dict
+    payload: dict[str, Any]
     valid_critical_reasons: set[str] = field(default_factory=set)

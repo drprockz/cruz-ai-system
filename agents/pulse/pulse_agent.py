@@ -32,10 +32,12 @@ import datetime
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import anthropic
 import httpx
+import yaml
 
 from agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from services.db import get_db_service
@@ -50,6 +52,19 @@ logger = logging.getLogger("cruz.agents.PULSE")
 _MODEL = "llama3.1:8b"
 
 _GOOGLE_CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
+
+_SOURCES_PATH = str(Path(__file__).parent / "sources.yml")
+
+
+def _load_pages() -> list[dict]:
+    """Load page entries from sources.yml. Returns [] if file missing/empty."""
+    try:
+        with open(_SOURCES_PATH, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return data.get("pages") or []
+    except FileNotFoundError:
+        return []
+
 
 _SYSTEM_PROMPT = """You are PULSE, Darshan's morning briefing assistant.
 Given today's calendar, overnight research, agent activity, and pending tasks,
@@ -95,6 +110,8 @@ class PulseAgent(BaseAgent):
             overnight_research = await self._gather_research()
             overnight_agents = await self._gather_overnight_agents(db)
             pending_tasks = await self._gather_pending_tasks(db)
+            # Browser-sourced roundup (new in SP4)
+            web_roundup = await self._gather_web_roundup(input["trace_id"])
 
             # ── Build briefing prompt ─────────────────────────────────────
             prompt = _build_prompt(
@@ -143,6 +160,7 @@ class PulseAgent(BaseAgent):
                 "overnight_research": overnight_research,
                 "overnight_agents": overnight_agents,
                 "pending_tasks": pending_tasks,
+                "web_roundup": web_roundup,
                 "summary": summary,
             }
 
@@ -227,6 +245,29 @@ class PulseAgent(BaseAgent):
         except Exception as exc:
             logger.warning("agent_logs fetch failed: %s", exc)
             return []
+
+    async def _gather_web_roundup(self, trace_id: str) -> List[Dict[str, str]]:
+        """Fetch each page in sources.yml; return list of {url,title,excerpt}.
+        Each page failure is logged and skipped — the rest still render."""
+        from services.browser import get_browser_service, BrowserError
+        out: List[Dict[str, str]] = []
+        for entry in _load_pages():
+            url = entry.get("url")
+            if not url:
+                continue
+            try:
+                page = await get_browser_service().fetch(url, trace_id=trace_id)
+            except BrowserError as exc:
+                logger.warning(
+                    "[%s] PULSE web roundup skip %s: %s", trace_id, url, exc,
+                )
+                continue
+            out.append({
+                "url": url,
+                "title": page.get("title", ""),
+                "excerpt": (page.get("text") or "")[:500],
+            })
+        return out
 
     async def _gather_pending_tasks(self, db: Any) -> List[Dict[str, Any]]:
         try:

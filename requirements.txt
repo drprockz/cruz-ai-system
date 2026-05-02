@@ -11,6 +11,7 @@ async-timeout==5.0.1
 asyncpg==0.31.0
 attrs==26.1.0
 backports.asyncio.runner==1.2.0
+beautifulsoup4==4.12.3
 certifi==2026.2.25
 charset-normalizer==3.4.7
 click==8.1.8
@@ -22,7 +23,8 @@ fastapi==0.128.8
 filelock==3.19.1
 frozenlist==1.8.0
 fsspec==2025.10.0
-greenlet==3.2.5
+# Pinned by playwright==1.49.* (which requires greenlet==3.1.1 exactly).
+greenlet==3.1.1
 grpcio==1.80.0
 h11==0.16.0
 h2==4.3.0
@@ -48,6 +50,7 @@ packaging==26.0
 pillow==11.3.0
 pluggy==1.6.0
 portalocker==3.2.0
+playwright==1.49.*
 propcache==0.4.1
 protobuf==6.33.6
 psycopg2-binary==2.9.11

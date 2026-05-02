@@ -774,8 +774,6 @@ async def webhook_google_calendar(request: Request) -> JSONResponse:
 
 # ─── Gmail Pub/Sub push receiver (SP5) ──────────────────────────────────────
 
-import base64
-
 # google-auth comes in transitively via google-api-python-client (already
 # in v1 for Calendar). If it's not installed in this env, requirements
 # need google-auth>=2.0.
@@ -791,21 +789,32 @@ def _verify_pubsub_jwt(token: str) -> Optional[dict]:
     """Verify a Pub/Sub OIDC token. Returns the decoded claims dict on
     success, None on failure. See Google docs:
       https://cloud.google.com/pubsub/docs/push#authentication
+
+    Returns None on every failure mode to avoid leaking why to the caller
+    (the endpoint just responds 401). For operators, each branch logs a
+    distinct warning so misconfiguration (e.g. missing audience env, missing
+    google-auth dep) is distinguishable from an actual attack in logs.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     if not _GOOGLE_AUTH_AVAILABLE:
+        _log.warning("gmail pubsub: google-auth not installed; verification disabled")
         return None
     audience = os.environ.get("GMAIL_PUBSUB_AUDIENCE", "")
     expected_email = os.environ.get("GMAIL_PUBSUB_SERVICE_ACCOUNT", "")
     if not audience:
+        _log.warning("gmail pubsub: GMAIL_PUBSUB_AUDIENCE not set; cannot verify")
         return None
     try:
         claims = _g_id_token.verify_oauth2_token(
             token, _g_requests.Request(), audience=audience,
         )
         if expected_email and claims.get("email") != expected_email:
+            _log.warning("gmail pubsub: email claim mismatch")
             return None
         return claims
-    except Exception:
+    except Exception as exc:
+        _log.warning("gmail pubsub: jwt verify failed: %s", exc)
         return None
 
 

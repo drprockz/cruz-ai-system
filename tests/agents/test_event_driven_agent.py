@@ -160,3 +160,49 @@ async def test_emit_payload_carries_agent_and_dedup_key_for_telegram_button(agen
     assert p["agent"] == "_FixtureAgent"
     assert p["dedup_key"] == "email:abc"
     assert p["text"] == "URGENT"
+
+
+# ── EVENT_REGISTRY tests ────────────────────────────────────────
+
+from agents.event_driven_agent import (
+    EVENT_REGISTRY,
+    register_event_agent,
+    clear_event_registry,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registry():
+    clear_event_registry()
+    yield
+    clear_event_registry()
+
+
+def test_register_adds_agent_class_to_each_trigger(agent):
+    register_event_agent(_FixtureAgent)
+    assert _FixtureAgent in EVENT_REGISTRY["cron.test.hourly"]
+
+
+def test_register_two_agents_for_same_trigger():
+    class A(EventDrivenAgent):
+        TRIGGERS = ["x"]
+        async def process(self, input): return None
+    class B(EventDrivenAgent):
+        TRIGGERS = ["x"]
+        async def process(self, input): return None
+    register_event_agent(A)
+    register_event_agent(B)
+    assert A in EVENT_REGISTRY["x"]
+    assert B in EVENT_REGISTRY["x"]
+    assert len(EVENT_REGISTRY["x"]) == 2
+
+
+def test_register_idempotent_does_not_duplicate(agent):
+    register_event_agent(_FixtureAgent)
+    register_event_agent(_FixtureAgent)
+    assert EVENT_REGISTRY["cron.test.hourly"].count(_FixtureAgent) == 1
+
+
+def test_unknown_trigger_returns_empty_list():
+    """Lookup of unsubscribed trigger returns empty list, not KeyError."""
+    assert EVENT_REGISTRY.get("never.registered.trigger", []) == []

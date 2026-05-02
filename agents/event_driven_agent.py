@@ -80,3 +80,26 @@ class EventDrivenAgent(BaseAgent):
         # GateDecision.SUPPRESS: silent — gate already logged the decision
 
         return decision
+
+
+# ── Event registry (built at app boot) ─────────────────────────────────
+
+EVENT_REGISTRY: dict[str, list[type[EventDrivenAgent]]] = {}
+
+
+def register_event_agent(cls: type[EventDrivenAgent]) -> None:
+    """Add an EventDrivenAgent subclass to EVENT_REGISTRY for each
+    of its TRIGGERS. Idempotent — registering the same class twice
+    is a no-op."""
+    for trigger in cls.TRIGGERS:
+        agents = EVENT_REGISTRY.setdefault(trigger, [])
+        if cls not in agents:
+            agents.append(cls)
+            logger.debug(
+                "registered %s for trigger %s", cls.__name__, trigger
+            )
+
+
+def clear_event_registry() -> None:
+    """Test helper — wipe all registrations."""
+    EVENT_REGISTRY.clear()

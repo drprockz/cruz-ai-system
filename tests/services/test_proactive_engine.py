@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 import pytest
 
-from services.proactive_engine import GateDecision, GateRequest
+from services.proactive_engine import GateDecision, GateRequest, ProactiveEngine
 
 
 def test_gate_decision_has_four_outcomes():
@@ -31,11 +34,6 @@ def test_gate_request_accepts_valid_critical_reasons_set():
     )
     assert req.severity == "critical"
     assert req.valid_critical_reasons == {"client_email_unanswered_72h"}
-
-
-import time
-from typing import Any
-from services.proactive_engine import ProactiveEngine, get_proactive_engine
 
 
 @pytest.fixture(autouse=True)
@@ -309,7 +307,6 @@ async def test_every_decision_writes_to_agent_logs(gate, fake_db):
 @pytest.mark.asyncio
 async def test_cached_get_called_for_cooldown_and_dedup(monkeypatch, gate):
     """`_decide` reads dedup + cooldown:any through the cache wrapper."""
-    from typing import Any
     calls: list[tuple[str, str]] = []
     original = gate._cached_get
     async def spy(agent: str, key: str, default: Any = None) -> Any:
@@ -330,7 +327,6 @@ async def test_cached_get_called_for_cooldown_and_dedup(monkeypatch, gate):
 async def test_counter_reads_bypass_cache(monkeypatch, gate):
     """Counter read-modify-write paths MUST stay on uncached state.get
     to avoid 60s-stale cache losing increments."""
-    from typing import Any
     cached_calls: list[str] = []
     state_calls: list[str] = []
     orig_cached = gate._cached_get

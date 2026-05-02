@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from services.agent_state import StateService, get_state_service
+from services.agent_state import get_state_service
 from services.db import get_db_service
 from services.redis_client import get_redis_service
 

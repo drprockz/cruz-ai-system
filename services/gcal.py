@@ -23,6 +23,18 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Top-level google imports — hoisted from inside methods because
+# tests/services/test_backup.py mutates sys.modules["googleapiclient.http"]
+# and does NOT restore it. Lazy `from googleapiclient.errors import HttpError`
+# inside our methods re-resolves through that polluted namespace and fails.
+# Importing here once binds HttpError / build / Credentials / Request to this
+# module's namespace, where they remain stable regardless of later sys.modules
+# mutation.
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 logger = logging.getLogger("cruz.services.gcal")
 
 _DEFAULT_TOKEN_PATH = "~/.config/cruz/gcal-token.json"
@@ -71,8 +83,6 @@ class GCalService:
 
     def _load_credentials(self):
         """Load Credentials from GCAL_TOKEN_PATH. Raise GCalAuthError on failure."""
-        from google.oauth2.credentials import Credentials
-
         if not self._token_path.exists():
             raise GCalAuthError(f"token file not found at {self._token_path}")
         try:
@@ -96,7 +106,6 @@ class GCalService:
         if not creds.valid:
             with self._refresh_lock:
                 if not creds.valid:
-                    from google.auth.transport.requests import Request
                     try:
                         creds.refresh(Request())
                     except Exception as exc:
@@ -108,7 +117,6 @@ class GCalService:
 
     def _build_service(self):
         """Build a Google Calendar service object. Cached per call (cheap)."""
-        from googleapiclient.discovery import build
         creds = self._load_credentials()
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
@@ -141,7 +149,6 @@ class GCalService:
         return await asyncio.to_thread(self._sync_create_event, cal, body)
 
     def _sync_create_event(self, cal: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        from googleapiclient.errors import HttpError
         try:
             return self._build_service().events().insert(
                 calendarId=cal,
@@ -166,7 +173,6 @@ class GCalService:
         )
 
     def _sync_list_events(self, cal: str, time_min: str, time_max: str) -> List[Dict[str, Any]]:
-        from googleapiclient.errors import HttpError
         try:
             response = self._build_service().events().list(
                 calendarId=cal,
@@ -192,7 +198,6 @@ class GCalService:
         await asyncio.to_thread(self._sync_delete_event, cal, event_id)
 
     def _sync_delete_event(self, cal: str, event_id: str) -> None:
-        from googleapiclient.errors import HttpError
         try:
             self._build_service().events().delete(
                 calendarId=cal, eventId=event_id

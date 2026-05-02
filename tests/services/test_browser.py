@@ -142,3 +142,52 @@ async def test_search_returns_top_n(monkeypatch, tmp_path):
     results = await svc.search("cruz ai", limit=3, profile="default")
     assert len(results) == 3
     assert results[0]["rank"] == 1
+
+
+# --- Task 2.2: fetch() + retry policy ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_returns_page_result(monkeypatch):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock(return_value=MagicMock(status=200))
+    fake_page.content = AsyncMock(return_value="<html><body>hi</body></html>")
+    fake_page.title = AsyncMock(return_value="Example")
+    fake_page.url = "https://example.com/"
+    fake_page.evaluate = AsyncMock(return_value="hi")
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    result = await svc.fetch("https://example.com")
+    assert result["status"] == 200
+    assert result["title"] == "Example"
+    assert result["text"] == "hi"
+    assert result["byte_size"] > 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_retries_once_then_surfaces(monkeypatch):
+    from playwright.async_api import TimeoutError as PWTimeout
+
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock(side_effect=PWTimeout("timed out"))
+    fake_page.close = AsyncMock()
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+    monkeypatch.setattr(browser_mod, "_RETRY_BACKOFF_S", 0.0)
+
+    with pytest.raises(BrowserTimeoutError):
+        await svc.fetch("https://example.com", timeout_ms=100)
+
+    # Two goto attempts: original + one retry
+    assert fake_page.goto.await_count == 2

@@ -14,7 +14,12 @@ import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
-from services.browser.errors import BrowserError, BrowserProfileError
+from services.browser.errors import (
+    BrowserError,
+    BrowserProfileError,
+    BrowserTimeoutError,
+    BrowserNavigationError,
+)
 from services.browser.parsers import (
     PageResult,
     SearchResult,
@@ -42,6 +47,9 @@ _CHROMIUM_ARGS: list[str] = [
 # Pacing — overridden in tests via monkeypatch. Set BROWSER_PACE_DISABLED=1 in
 # the environment to skip the random pre-dispatch sleep.
 BROWSER_PACE_DISABLED: bool = bool(os.environ.get("BROWSER_PACE_DISABLED"))
+
+# Retry backoff for fetch() on transient failures (timeout, network errors, 5xx)
+_RETRY_BACKOFF_S: float = 2.0
 
 
 async def _async_playwright_start():
@@ -121,6 +129,68 @@ class BrowserService:
             html = await page.content()
             results = _parse_ddg_html(html)[:limit]
             return results
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    async def fetch(
+        self,
+        url: str,
+        *,
+        render_js: bool = True,
+        wait_for: Optional[str] = None,
+        timeout_ms: int = 15000,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> PageResult:
+        """Fetch a URL; render JS by default; return rendered html + text."""
+        from playwright.async_api import TimeoutError as PWTimeout, Error as PWError
+
+        await self._pace()
+        ctx = await self._get_context(profile)
+        page = await ctx.new_page()
+        try:
+            attempt = 0
+            last_exc: Optional[BaseException] = None
+            while attempt < 2:
+                try:
+                    wait_until = "domcontentloaded" if not render_js else "networkidle"
+                    resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                    if wait_for:
+                        await page.wait_for_selector(wait_for, timeout=timeout_ms)
+                    # Inter-fetch jitter
+                    if not BROWSER_PACE_DISABLED and wait_for is None:
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                    html = await page.content()
+                    title = await page.title()
+                    text = await page.evaluate("document.body ? document.body.innerText : ''")
+                    status = resp.status if resp else 0
+                    if status >= 500:
+                        last_exc = BrowserNavigationError(f"http {status} from {url}")
+                        raise last_exc
+                    return PageResult(
+                        url=url,
+                        final_url=page.url,
+                        status=status,
+                        title=title or "",
+                        html=html,
+                        text=text or "",
+                        byte_size=len(html),
+                    )
+                except PWTimeout as exc:
+                    last_exc = BrowserTimeoutError(f"timeout on {url}: {exc}")
+                except PWError as exc:
+                    last_exc = BrowserNavigationError(f"navigation error on {url}: {exc}")
+                except BrowserNavigationError:
+                    # Already a 5xx — retry
+                    pass
+                attempt += 1
+                if attempt < 2:
+                    await asyncio.sleep(_RETRY_BACKOFF_S)
+            assert last_exc is not None
+            raise last_exc
         finally:
             try:
                 await page.close()

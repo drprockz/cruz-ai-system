@@ -65,6 +65,16 @@ class MacControllerService:
 
     # ── Public primitives ─────────────────────────────────────────────
 
+    async def clipboard_read(self) -> str:
+        """Return the current clipboard contents as text. Empty clipboard → ''."""
+        out = await self._run_osascript("the clipboard as text")
+        return out.rstrip("\n")
+
+    async def clipboard_write(self, text: str) -> None:
+        """Replace the clipboard with the given text."""
+        text_esc = _escape_applescript_string(text)
+        await self._run_osascript(f'set the clipboard to "{text_esc}"')
+
     async def notify(self, title: str, body: str, sound: bool = False) -> None:
         """Fire a macOS Notification Center banner."""
         title_esc = _escape_applescript_string(title)

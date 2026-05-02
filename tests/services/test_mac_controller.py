@@ -89,3 +89,48 @@ async def test_notify_propagates_error() -> None:
     ):
         with pytest.raises(MacControllerError, match="permission denied"):
             await svc.notify("x", "y")
+
+
+# ── clipboard ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_clipboard_read_basic() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="hello\n")) as run:
+        result = await svc.clipboard_read()
+    assert result == "hello"
+    script = run.await_args.args[0]
+    assert "the clipboard as text" in script
+
+
+@pytest.mark.asyncio
+async def test_clipboard_read_empty() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="\n")):
+        assert await svc.clipboard_read() == ""
+
+
+@pytest.mark.asyncio
+async def test_clipboard_write_basic() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")) as run:
+        await svc.clipboard_write("paste me")
+    script = run.await_args.args[0]
+    assert 'set the clipboard to "paste me"' in script
+
+
+@pytest.mark.asyncio
+async def test_clipboard_write_escapes_quotes() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")) as run:
+        await svc.clipboard_write('say "hi"')
+    script = run.await_args.args[0]
+    assert '\\"hi\\"' in script
+
+
+@pytest.mark.asyncio
+async def test_clipboard_write_empty_string_ok() -> None:
+    svc = MacControllerService()
+    with patch.object(svc, "_run_osascript", new=AsyncMock(return_value="")):
+        await svc.clipboard_write("")  # must not raise

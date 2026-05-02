@@ -191,3 +191,87 @@ async def test_fetch_retries_once_then_surfaces(monkeypatch):
 
     # Two goto attempts: original + one retry
     assert fake_page.goto.await_count == 2
+
+
+# --- Task 2.3: extract_text / screenshot / download / session ---
+
+
+@pytest.mark.asyncio
+async def test_extract_text_default_cascade(monkeypatch):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    html = (
+        "<html><body>"
+        "<nav>nav</nav>"
+        "<article>real content here</article>"
+        "</body></html>"
+    )
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock(return_value=MagicMock(status=200))
+    fake_page.content = AsyncMock(return_value=html)
+    fake_page.title = AsyncMock(return_value="t")
+    fake_page.url = "https://example.com/"
+    fake_page.evaluate = AsyncMock(return_value="real content here")
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    text = await svc.extract_text("https://example.com")
+    assert "real content here" in text
+    assert "nav" not in text
+
+
+@pytest.mark.asyncio
+async def test_screenshot_returns_png_bytes(monkeypatch):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock(return_value=MagicMock(status=200))
+    fake_page.screenshot = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n...")
+    fake_page.url = "https://example.com/"
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    png = await svc.screenshot("https://example.com")
+    assert png.startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_download_writes_to_path(monkeypatch, tmp_path):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fake_resp = MagicMock()
+    fake_resp.body = AsyncMock(return_value=b"hello world")
+    fake_resp.status = 200
+    fake_ctx = MagicMock()
+    fake_ctx.request.get = AsyncMock(return_value=fake_resp)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    dest = tmp_path / "out.bin"
+    result = await svc.download("https://example.com/file", str(dest))
+    assert result == dest
+    assert dest.read_bytes() == b"hello world"
+
+
+@pytest.mark.asyncio
+async def test_session_yields_page(monkeypatch):
+    browser_mod._instance = None
+    svc = get_browser_service()
+
+    fake_page = MagicMock()
+    fake_page.close = AsyncMock()
+    fake_ctx = MagicMock()
+    fake_ctx.new_page = AsyncMock(return_value=fake_page)
+    monkeypatch.setattr(svc, "_get_context", AsyncMock(return_value=fake_ctx))
+    monkeypatch.setattr(browser_mod, "BROWSER_PACE_DISABLED", True)
+
+    async with svc.session(profile="default") as page:
+        assert page is fake_page
+    fake_page.close.assert_awaited()

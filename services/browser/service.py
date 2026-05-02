@@ -12,7 +12,8 @@ import random
 import re
 import urllib.parse
 from pathlib import Path
-from typing import List, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, List, Optional
 
 from services.browser.errors import (
     BrowserError,
@@ -191,6 +192,94 @@ class BrowserService:
                     await asyncio.sleep(_RETRY_BACKOFF_S)
             assert last_exc is not None
             raise last_exc
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    async def extract_text(
+        self,
+        url: str,
+        *,
+        selector: Optional[str] = None,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> str:
+        """Fetch URL and return plain text from the first matching container."""
+        page_result = await self.fetch(url, profile=profile, trace_id=trace_id)
+        if selector:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(page_result["html"], "html.parser")
+            el = soup.select_one(selector)
+            return el.get_text(" ", strip=True) if el else ""
+        # Default cascade: <article> → <main> → <body>
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(page_result["html"], "html.parser")
+        for sel in ("article", "main", "body"):
+            el = soup.select_one(sel)
+            if el and el.get_text(strip=True):
+                return el.get_text(" ", strip=True)
+        return page_result["text"]
+
+    async def screenshot(
+        self,
+        url: str,
+        *,
+        full_page: bool = False,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> bytes:
+        """Navigate to URL and return a PNG screenshot."""
+        await self._pace()
+        ctx = await self._get_context(profile)
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=15000)
+            return await page.screenshot(full_page=full_page, type="png")
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    async def download(
+        self,
+        url: str,
+        dest_path: str,
+        *,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> Path:
+        """Download a binary URL via Playwright's APIRequestContext; write to disk."""
+        await self._pace()
+        ctx = await self._get_context(profile)
+        resp = await ctx.request.get(url)
+        if resp.status >= 400:
+            raise BrowserNavigationError(f"http {resp.status} from {url}")
+        body = await resp.body()
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(body)
+        return dest
+
+    @asynccontextmanager
+    async def session(
+        self,
+        *,
+        profile: str = "default",
+        trace_id: str = "",
+    ) -> AsyncIterator[Any]:
+        """Escape hatch — yield a raw Playwright Page. Prefer a primitive instead.
+
+        The page is closed on context exit. Use only when the five primitives
+        can't express the interaction you need.
+        """
+        await self._pace()
+        ctx = await self._get_context(profile)
+        page = await ctx.new_page()
+        try:
+            yield page
         finally:
             try:
                 await page.close()

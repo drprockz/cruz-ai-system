@@ -15,6 +15,8 @@ import logging
 import uuid
 from typing import Any, Callable
 
+from agents.base_agent import AgentInput
+
 logger = logging.getLogger("cruz.workers.dispatch")
 
 
@@ -53,7 +55,7 @@ async def dispatch_event_to_agent(
     try:
         factory = _import_class(module_path, class_name)
         agent = factory()
-        agent_input = {
+        agent_input: AgentInput = {
             "task": f"event:{event.get('trigger', 'unknown')}",
             "context": {"event": event},
             "trace_id": trace_id,

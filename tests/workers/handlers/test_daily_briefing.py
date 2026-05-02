@@ -72,3 +72,25 @@ async def test_daily_briefing_handles_empty_window_gracefully(ctx):
         result = await handle({}, ctx)
     assert result.success is True
     assert any("no activity" in t.lower() or "0" in t for t in captured)
+
+
+@pytest.mark.asyncio
+async def test_daily_briefing_marks_failure_when_db_query_throws():
+    """DB failure → result.success is False, error is set, but we still emit
+    a digest so the user isn't left in silence."""
+    ctx = HandlerContext(trace_id="t",
+                          now=datetime(2026, 4, 26, 7, 0, tzinfo=timezone.utc))
+    captured = []
+    async def fake_emit(handler_name, reason, dedup_key, payload):
+        captured.append(payload)
+
+    bad_db = AsyncMock()
+    bad_db.fetch = AsyncMock(side_effect=RuntimeError("postgres unreachable"))
+    with patch.object(ctx, "_db", bad_db), \
+         patch.object(ctx, "emit_info", fake_emit):
+        result = await handle({}, ctx)
+
+    assert result.success is False
+    assert result.error == "db_query_failed"
+    assert result.metadata.get("db_failed") is True
+    assert len(captured) == 1  # still emitted a digest

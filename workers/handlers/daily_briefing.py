@@ -37,6 +37,7 @@ async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerRes
     # for dedup-key formatting and labelling.
     # Verified in Chunk 1+: services.db.DatabaseService exposes
     #   async def fetch(query: str, *args) -> list[asyncpg.Record]
+    db_failed = False
     try:
         rows = await context.db.fetch(
             """
@@ -49,6 +50,7 @@ async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerRes
     except Exception as exc:  # noqa: BLE001
         logger.warning("daily_briefing: db query failed: %s", exc)
         rows = []
+        db_failed = True
 
     by_agent: Counter = Counter()
     by_status: Counter = Counter()
@@ -60,8 +62,11 @@ async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerRes
         if r["action"] == "gate_decision" and r["status"] in ("demote_warn", "suppress"):
             gate_demotions += 1
 
+    # Note: text uses Telegram MarkdownV1 (*bold*). info-tier emissions only
+    # go to Telegram in SP5 (per spec §5); if the router fans out to other
+    # channels later, formatting becomes the router's responsibility.
     if not rows:
-        text = "📋 *CRUZ daily briefing — " + today + "*\n\nNo agent activity in the last 24h."
+        text = f"📋 *CRUZ daily briefing — {today}*\n\nNo agent activity in the last 24h."
     else:
         agent_lines = "\n".join(
             f"  • {agent}: {n}" for agent, n in by_agent.most_common(10)
@@ -79,9 +84,16 @@ async def handle(payload: Dict[str, Any], context: HandlerContext) -> HandlerRes
         payload={"text": text, "trace_id": context.trace_id},
     )
     decision_label = getattr(decision, "value", str(decision))
-    return HandlerResult(
-        handler_name=HANDLER_NAME,
-        success=True,
-        summary=f"emitted: {decision_label}, rows={len(rows)}",
-        metadata={"row_count": len(rows), "agent_breakdown": dict(by_agent)},
-    )
+    result_kwargs: Dict[str, Any] = {
+        "handler_name": HANDLER_NAME,
+        "success": not db_failed,
+        "summary": f"emitted: {decision_label}, rows={len(rows)}",
+        "metadata": {
+            "row_count": len(rows),
+            "agent_breakdown": dict(by_agent),
+            "db_failed": db_failed,
+        },
+    }
+    if db_failed:
+        result_kwargs["error"] = "db_query_failed"
+    return HandlerResult(**result_kwargs)

@@ -77,31 +77,30 @@ class ProactiveEngine:
         return decision
 
     async def _decide(self, req: GateRequest) -> GateDecision:
-        """Apply gate steps in order and return the decision."""
-        # Step 1: Whitelist
+        # Step 1: Whitelist (no state read)
         if req.severity == "critical":
             if (req.reason_code is None
                     or req.reason_code not in req.valid_critical_reasons):
                 return GateDecision.DEMOTE_TO_WARN
 
-        # Step 2: Dedup
+        # Step 2: Dedup — CACHED
         dedup_key = f"dedup:{req.agent}:{req.dedup_key}"
-        if await self._state.get(self.GATE_AGENT, dedup_key) is not None:
+        if await self._cached_get(self.GATE_AGENT, dedup_key) is not None:
             return GateDecision.SUPPRESS
 
-        # Step 3: Critical cooldown
+        # Step 3: Critical cooldown — CACHED
         if req.severity == "critical":
-            cool_crit = await self._state.get(
+            cool_crit = await self._cached_get(
                 self.GATE_AGENT, f"cooldown:{req.agent}:critical")
             if cool_crit is not None and time.time() - cool_crit < self.PER_AGENT_COOLDOWN_CRIT:
                 return GateDecision.SUPPRESS
 
-        # Step 4: Per-agent cooldown
-        cool_any = await self._state.get(
+        # Step 4: Per-agent cooldown — CACHED
+        cool_any = await self._cached_get(
             self.GATE_AGENT, f"cooldown:{req.agent}:any")
         if cool_any is not None and time.time() - cool_any < self.PER_AGENT_COOLDOWN_ANY:
             if req.severity == "info":
-                # Step 4a: per-agent info safety cap
+                # Step 4a: per-agent info safety cap — UNCACHED counter
                 today = self._today()
                 cnt = await self._state.get(
                     self.GLOBAL_AGENT,
@@ -113,7 +112,7 @@ class ProactiveEngine:
                 return GateDecision.ALLOW
             return GateDecision.DEMOTE_TO_INFO
 
-        # Step 5: Global daily rate limit (non-info only)
+        # Step 5: Global daily rate limit (non-info only) — UNCACHED counter
         if req.severity != "info":
             today = self._today()
             daily = await self._state.get(
@@ -121,7 +120,8 @@ class ProactiveEngine:
             if daily >= self.GLOBAL_DAILY_RATE_LIMIT:
                 return GateDecision.SUPPRESS
 
-        # Step 4a (re-check for info path that didn't hit cooldown)
+        # Step 4a (info path that didn't hit cooldown) — UNCACHED counter.
+        # Spec §3.2 step 5: info still routed up to the per-agent cap from 4a.
         if req.severity == "info":
             today = self._today()
             cnt = await self._state.get(
@@ -135,18 +135,24 @@ class ProactiveEngine:
         return GateDecision.ALLOW
 
     async def _post_decision(self, req: GateRequest, decision: GateDecision) -> None:
-        """Update counters/cooldowns after a non-suppressed decision."""
+        """Update counters/cooldowns after a non-suppressed decision.
+
+        Counter reads stay on `self._state.get` (uncached) — see Task 2.4
+        constraint. Cacheable writes (cooldown/dedup) invalidate the cache
+        immediately after the set so the next dispatch sees fresh state.
+        """
         if decision == GateDecision.SUPPRESS:
             return
 
         now_ts = time.time()
         today = self._today()
 
-        # Per-agent any-cooldown (always set when something routes)
+        # Per-agent any-cooldown
         await self._state.set(
             self.GATE_AGENT, f"cooldown:{req.agent}:any", now_ts,
             ttl_seconds=self.PER_AGENT_COOLDOWN_ANY,
         )
+        await self._cache_invalidate(self.GATE_AGENT, f"cooldown:{req.agent}:any")
 
         # Critical cooldown only when this was actually a critical that ALLOWed
         if decision == GateDecision.ALLOW and req.severity == "critical":
@@ -154,14 +160,18 @@ class ProactiveEngine:
                 self.GATE_AGENT, f"cooldown:{req.agent}:critical", now_ts,
                 ttl_seconds=self.PER_AGENT_COOLDOWN_CRIT,
             )
+            await self._cache_invalidate(
+                self.GATE_AGENT, f"cooldown:{req.agent}:critical")
 
-        # Dedup key (always set when routed — prevents repeat of the same logical ping)
+        # Dedup key
         await self._state.set(
             self.GATE_AGENT, f"dedup:{req.agent}:{req.dedup_key}", now_ts,
             ttl_seconds=self.DEDUP_WINDOW,
         )
+        await self._cache_invalidate(
+            self.GATE_AGENT, f"dedup:{req.agent}:{req.dedup_key}")
 
-        # Counter: routed severity. Use the EFFECTIVE severity after demotion.
+        # Counter increment — UNCACHED read + write to avoid stale-cache races.
         eff_severity = self._effective_severity(req.severity, decision)
         if eff_severity == "info":
             cnt_key = f"info_count_per_agent:{req.agent}:{today}"
@@ -200,6 +210,62 @@ class ProactiveEngine:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("gate_decision log failed (non-fatal): %s", exc)
+
+    # ── Hot cache wrapper (Redis read-through) ────────────────────
+    #
+    # Cacheable: cooldown:* and dedup:* keys (existence/timestamp probes).
+    # NOT cacheable: counter keys (info_count_per_agent, daily_count) —
+    # they participate in read-modify-write increments. A stale read
+    # would silently lose counter increments. See spec §3.1, §3.2 step 5.
+
+    CACHE_TTL_SECONDS = 60
+
+    # Sentinel — `is`-comparable, distinct from any user value including 0/None.
+    _MISSING = object()
+
+    async def _cached_get(
+        self, agent: str, key: str, default: Any = None,
+    ) -> Any:
+        """Read-through cache. Redis first, then StateService (Postgres)."""
+        cache_key = f"cruz:gate:{agent}:{key}"
+        try:
+            redis = get_redis_service()
+            if redis.client is not None:
+                raw = await redis.client.get(cache_key)
+                if raw is not None:
+                    if raw in (b"__MISSING__", "__MISSING__"):
+                        return default
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        return default
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("redis cache read failed (non-fatal): %s", exc)
+
+        # Cache miss — read source of truth using the sentinel so we can
+        # distinguish "absent" from "value happens to equal default".
+        value = await self._state.get(agent, key, self._MISSING)
+        was_missing = value is self._MISSING
+        if was_missing:
+            value = default
+
+        try:
+            redis = get_redis_service()
+            if redis.client is not None:
+                payload = "__MISSING__" if was_missing else json.dumps(value, default=str)
+                await redis.client.set(cache_key, payload, ex=self.CACHE_TTL_SECONDS)
+        except Exception as exc:
+            logger.debug("redis cache write failed (non-fatal): %s", exc)
+        return value
+
+    async def _cache_invalidate(self, agent: str, key: str) -> None:
+        """Delete the cached entry for this key so the next read sees fresh state."""
+        try:
+            redis = get_redis_service()
+            if redis.client is not None:
+                await redis.client.delete(f"cruz:gate:{agent}:{key}")
+        except Exception:
+            pass
 
     @staticmethod
     def _effective_severity(severity: str, decision: GateDecision) -> str:

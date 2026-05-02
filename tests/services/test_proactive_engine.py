@@ -304,3 +304,74 @@ async def test_every_decision_writes_to_agent_logs(gate, fake_db):
     assert args[0] == "trace-1"
     assert args[1] == "x"
     assert args[2] == "allow"  # decision
+
+
+@pytest.mark.asyncio
+async def test_cached_get_called_for_cooldown_and_dedup(monkeypatch, gate):
+    """`_decide` reads dedup + cooldown:any through the cache wrapper."""
+    from typing import Any
+    calls: list[tuple[str, str]] = []
+    original = gate._cached_get
+    async def spy(agent: str, key: str, default: Any = None) -> Any:
+        calls.append((agent, key))
+        return await original(agent, key, default)
+    monkeypatch.setattr(gate, "_cached_get", spy)
+
+    req = GateRequest(agent="x", severity="warn", reason_code=None,
+                      dedup_key="hot1", payload={},
+                      valid_critical_reasons=set())
+    await gate.allow(req)
+    keys_read = {k for _, k in calls}
+    assert "dedup:x:hot1" in keys_read
+    assert "cooldown:x:any" in keys_read
+
+
+@pytest.mark.asyncio
+async def test_counter_reads_bypass_cache(monkeypatch, gate):
+    """Counter read-modify-write paths MUST stay on uncached state.get
+    to avoid 60s-stale cache losing increments."""
+    from typing import Any
+    cached_calls: list[str] = []
+    state_calls: list[str] = []
+    orig_cached = gate._cached_get
+    orig_state = gate._state.get
+
+    async def cached_spy(agent, key, default=None):
+        cached_calls.append(key)
+        return await orig_cached(agent, key, default)
+
+    async def state_spy(agent, key, default=None):
+        state_calls.append(key)
+        return await orig_state(agent, key, default)
+
+    monkeypatch.setattr(gate, "_cached_get", cached_spy)
+    monkeypatch.setattr(gate._state, "get", state_spy)
+
+    today = ProactiveEngine._today()
+    req = GateRequest(agent="x", severity="warn", reason_code=None,
+                      dedup_key="k_cnt", payload={},
+                      valid_critical_reasons=set())
+    await gate.allow(req)
+
+    daily_key = f"daily_count:{today}"
+    assert daily_key in state_calls, "counter read must bypass cache"
+    assert daily_key not in cached_calls, "counter must NOT be cached"
+
+
+@pytest.mark.asyncio
+async def test_cache_invalidate_called_after_each_set(monkeypatch, gate):
+    invalidated: list[tuple[str, str]] = []
+    orig = gate._cache_invalidate
+    async def spy(agent, key):
+        invalidated.append((agent, key))
+        await orig(agent, key)
+    monkeypatch.setattr(gate, "_cache_invalidate", spy)
+
+    req = GateRequest(agent="x", severity="critical", reason_code="r1",
+                      dedup_key="k_inv", payload={},
+                      valid_critical_reasons={"r1"})
+    await gate.allow(req)
+    invalidated_keys = {k for _, k in invalidated}
+    assert "cooldown:x:any" in invalidated_keys
+    assert "cooldown:x:critical" in invalidated_keys
+    assert "dedup:x:k_inv" in invalidated_keys

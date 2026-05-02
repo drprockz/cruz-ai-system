@@ -412,9 +412,12 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "start_iso":   {"type": "string"},
-                "end_iso":     {"type": "string"},
-                "calendar_id": {"type": "string"},
+                "start_iso":   {"type": "string",
+                                "description": "ISO 8601 datetime, inclusive lower bound."},
+                "end_iso":     {"type": "string",
+                                "description": "ISO 8601 datetime, exclusive upper bound."},
+                "calendar_id": {"type": "string",
+                                "description": "Optional non-primary calendar ID."},
             },
             "required": ["start_iso", "end_iso"],
         },

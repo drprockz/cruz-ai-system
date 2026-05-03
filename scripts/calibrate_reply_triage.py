@@ -29,43 +29,74 @@ VALID_URGENCIES = ["now", "today", "this_week", "later"]
 async def main(limit: int) -> int:
     print(f"Fetching last {limit} inbound emails…")
     msg_ids = await list_recent_inbound(limit)
-    print(f"Got {len(msg_ids)} message IDs.\n")
+    n = len(msg_ids)
+    print(f"Got {n} message IDs.\n")
 
     matches_label = 0
     matches_urgency = 0
     matches_joint = 0
+    evaluated = 0
+    skipped_invalid = 0
+    skipped_error = 0
+    interrupted = False
 
-    for i, mid in enumerate(msg_ids, 1):
-        msg = await fetch_message(mid)
-        agent_pred = await _classify_email(msg)
-        print(f"\n--- {i}/{len(msg_ids)} ---")
-        print(f"From:    {msg['from']}")
-        print(f"Subject: {msg['subject'][:80]}")
-        print(f"Agent:   label={agent_pred['label']:12s} urgency={agent_pred['urgency']}")
-        print("Your label?    [needs_reply / fyi / spam / promo] ", end="", flush=True)
-        user_label = input().strip() or agent_pred["label"]
-        print("Your urgency?  [now / today / this_week / later] ", end="", flush=True)
-        user_urgency = input().strip() or agent_pred["urgency"]
+    try:
+        for i, mid in enumerate(msg_ids, 1):
+            try:
+                msg = await fetch_message(mid)
+                agent_pred = await _classify_email(msg)
+            except Exception as exc:
+                print(f"\n--- {i}/{n} ---")
+                print(f"[skipped: {type(exc).__name__}: {exc}]")
+                skipped_error += 1
+                continue
 
-        if user_label not in VALID_LABELS or user_urgency not in VALID_URGENCIES:
-            print("invalid input; skipping this email")
-            continue
+            print(f"\n--- {i}/{n} ---")
+            print(f"From:    {msg['from']}")
+            print(f"Subject: {msg['subject'][:80]}")
+            print(f"Agent:   label={agent_pred['label']:12s} urgency={agent_pred['urgency']}")
+            print("Your label?    [needs_reply / fyi / spam / promo] ", end="", flush=True)
+            user_label = input().strip() or agent_pred["label"]
+            print("Your urgency?  [now / today / this_week / later] ", end="", flush=True)
+            user_urgency = input().strip() or agent_pred["urgency"]
 
-        l_match = (agent_pred["label"] == user_label)
-        u_match = (agent_pred["urgency"] == user_urgency)
-        matches_label   += int(l_match)
-        matches_urgency += int(u_match)
-        matches_joint   += int(l_match and u_match)
+            if user_label not in VALID_LABELS or user_urgency not in VALID_URGENCIES:
+                print("invalid input; skipping this email")
+                skipped_invalid += 1
+                continue
 
-    n = len(msg_ids)
+            l_match = (agent_pred["label"] == user_label)
+            u_match = (agent_pred["urgency"] == user_urgency)
+            matches_label   += int(l_match)
+            matches_urgency += int(u_match)
+            matches_joint   += int(l_match and u_match)
+            evaluated       += 1
+    except (KeyboardInterrupt, EOFError):
+        interrupted = True
+        print("\n\nInterrupted. Partial results below.")
+
     if n == 0:
         print("\nNo emails to evaluate. Check Gmail credentials.")
         return 1
+    if evaluated == 0:
+        print("\nNo emails were successfully evaluated.")
+        if skipped_invalid:
+            print(f"  ({skipped_invalid} skipped due to invalid input)")
+        if skipped_error:
+            print(f"  ({skipped_error} skipped due to fetch/classify errors)")
+        return 1
+
     print("\n=== Results ===")
-    print(f"Label-only match:    {matches_label}/{n} = {100*matches_label/n:.1f}%")
-    print(f"Urgency-only match:  {matches_urgency}/{n} = {100*matches_urgency/n:.1f}%")
-    print(f"Joint match:         {matches_joint}/{n} = {100*matches_joint/n:.1f}%")
-    joint_rate = matches_joint / n
+    print(f"Evaluated:  {evaluated}/{n}"
+          + (f" (skipped {skipped_invalid} invalid)" if skipped_invalid else "")
+          + (f" ({skipped_error} errored)" if skipped_error else ""))
+    print(f"Label-only match:    {matches_label}/{evaluated} = {100*matches_label/evaluated:.1f}%")
+    print(f"Urgency-only match:  {matches_urgency}/{evaluated} = {100*matches_urgency/evaluated:.1f}%")
+    print(f"Joint match:         {matches_joint}/{evaluated} = {100*matches_joint/evaluated:.1f}%")
+    joint_rate = matches_joint / evaluated
+
+    if interrupted:
+        return 130
     if joint_rate >= 0.80:
         print("\n✅ PASSES exit gate (≥80% joint match). Keep current model.")
         return 0

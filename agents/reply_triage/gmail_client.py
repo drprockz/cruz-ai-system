@@ -133,6 +133,43 @@ def _list_recent_sync(limit: int) -> List[str]:
     return [m["id"] for m in res.get("messages", [])]
 
 
+async def fetch_recent_with_attendee(email: str, limit: int = 5) -> List[dict]:
+    """Return recent message envelopes from threads that include `email`.
+
+    Used by MeetingPrepAgent to surface recent correspondence with each
+    attendee as part of the 25-35min meeting prep notification. Searches
+    Gmail for messages where `email` was on either side of the conversation
+    and fetches the full envelope for the most recent `limit` results.
+
+    On Gmail API failure: returns [] (conservative — meeting prep is
+    advisory; transient API issues should not crash the agent).
+    """
+    return await asyncio.to_thread(_fetch_recent_with_attendee_sync, email, limit)
+
+
+def _fetch_recent_with_attendee_sync(email: str, limit: int) -> List[dict]:
+    if not email:
+        return []
+    svc = _get_service()
+    query = f"from:{email} OR to:{email}"
+    try:
+        res = svc.users().messages().list(
+            userId=_USER_ID, q=query, maxResults=limit,
+        ).execute()
+    except Exception as exc:
+        logger.warning("gmail recent_with_attendee list failed for %s: %s", email, exc)
+        return []
+    msg_ids = [m["id"] for m in res.get("messages", []) if m.get("id")]
+    out: list[dict] = []
+    for mid in msg_ids:
+        try:
+            out.append(_fetch_message_sync(mid))
+        except Exception as exc:
+            logger.warning("gmail fetch_message failed for %s: %s", mid, exc)
+            continue
+    return out
+
+
 async def fetch_thread_replied(thread_id: str) -> bool:
     """Return True iff the client has replied to our latest outbound on
     this thread — i.e. there is at least one inbound message AFTER the

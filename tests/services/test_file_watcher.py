@@ -25,7 +25,13 @@ async def test_modification_enqueues_dispatch(tmp_path, monkeypatch):
 
     f = tmp_path / "h.md"
     f.write_text("init\n")
-    monkeypatch.setitem(WATCH_MAP, str(f), "filewatch.health_journal")
+    # Replace the whole WATCH_MAP so the real "docs/personal/health-journal.md"
+    # entry doesn't also get watched (which would create that path as a
+    # side-effect of running this test from the worktree root).
+    monkeypatch.setattr(
+        "services.file_watcher.WATCH_MAP",
+        {str(f): "filewatch.health_journal"},
+    )
 
     # Register a fake agent for the trigger
     clear_event_registry()

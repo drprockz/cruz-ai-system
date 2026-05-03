@@ -61,11 +61,16 @@ class FollowupAgent(EventDrivenAgent):
 
             if trigger == "webhook.gmail.outbound_sent":
                 await self._on_outbound_sent(state, data, trace_id)
-            else:
-                # Treat anything else (including cron.daily.10:00) as the
-                # daily scan — keeps behaviour predictable if the trigger
-                # string evolves.
+            elif trigger in ("cron.daily.10:00", ""):
+                # tests pass task="event" with no trigger string in some cases;
+                # the cron path is also taken when the event-loop dispatcher fans
+                # out the daily cron under its canonical name.
                 await self._scan_queue(state, trace_id)
+            else:
+                logger.warning(
+                    "[%s] followup got unexpected trigger %r; ignoring",
+                    trace_id, trigger,
+                )
 
             return AgentOutput(
                 success=True, result=None, agent=self.name,

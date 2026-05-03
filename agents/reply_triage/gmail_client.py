@@ -9,6 +9,7 @@ is lazily constructed.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import logging
@@ -43,7 +44,6 @@ def _get_service():
 
 async def fetch_message(message_id: str) -> dict:
     """Return the parsed message envelope: {id, subject, from, date, body, thread_id}."""
-    import asyncio
     return await asyncio.to_thread(_fetch_message_sync, message_id)
 
 
@@ -97,7 +97,6 @@ def _find_part_body(payload: dict, mime: str) -> str:
 
 async def fetch_history_since(history_id: str) -> List[str]:
     """Return list of new message IDs since `history_id`."""
-    import asyncio
     return await asyncio.to_thread(_fetch_history_sync, history_id)
 
 
@@ -123,7 +122,6 @@ def _fetch_history_sync(history_id: str) -> List[str]:
 
 async def list_recent_inbound(limit: int = 50) -> List[str]:
     """For the calibration script — returns latest `limit` inbound message IDs."""
-    import asyncio
     return await asyncio.to_thread(_list_recent_sync, limit)
 
 
@@ -136,17 +134,16 @@ def _list_recent_sync(limit: int) -> List[str]:
 
 
 async def fetch_thread_replied(thread_id: str) -> bool:
-    """Return True iff the thread has at least one outbound message
-    AFTER the latest inbound message (i.e. user/agent has replied).
+    """Return True iff the client has replied to our latest outbound on
+    this thread — i.e. there is at least one inbound message AFTER the
+    latest SENT message.
 
-    Implementation: fetch the thread, sort messages by internalDate,
-    find the latest inbound (no SENT label), check if any later
-    message has the SENT label.
+    Used by FollowupAgent to drop entries from the followup queue once
+    the client has responded.
 
     On Gmail API failure: returns False (conservative — won't suppress
     a legit follow-up alert because of transient API issues).
     """
-    import asyncio
     return await asyncio.to_thread(_fetch_thread_replied_sync, thread_id)
 
 
@@ -165,16 +162,16 @@ def _fetch_thread_replied_sync(thread_id: str) -> bool:
         return False
     # Sort by internalDate (ms since epoch, string).
     messages.sort(key=lambda m: int(m.get("internalDate", "0")))
-    last_inbound_idx = -1
+    last_outbound_idx = -1
     for i, m in enumerate(messages):
-        if "SENT" not in m.get("labelIds", []):
-            last_inbound_idx = i
-    if last_inbound_idx < 0:
-        # No inbound messages at all (we sent first, no reply ever).
-        # Treat as "not replied" — the followup is to chase the client's reply.
-        return False
-    # Any message AFTER the latest inbound that we sent counts as a reply.
-    for m in messages[last_inbound_idx + 1:]:
         if "SENT" in m.get("labelIds", []):
+            last_outbound_idx = i
+    if last_outbound_idx < 0:
+        # We never sent on this thread — nothing to follow up on.
+        return False
+    # Any message AFTER our latest outbound that we did NOT send
+    # counts as the client replying.
+    for m in messages[last_outbound_idx + 1:]:
+        if "SENT" not in m.get("labelIds", []):
             return True
     return False

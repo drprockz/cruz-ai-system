@@ -29,19 +29,11 @@ from typing import Any, Optional
 from agents.base_agent import AgentInput, AgentOutput
 from agents.event_driven_agent import EventDrivenAgent
 
-try:  # gmail_client pulls in google-api-python-client (optional in tests).
-    from agents.reply_triage.gmail_client import fetch_message
-except ImportError:  # pragma: no cover — covered by patch in tests.
-    async def fetch_message(message_id: str) -> dict:  # type: ignore[no-redef]
-        raise RuntimeError(
-            "gmail_client is unavailable (google-api-python-client not installed)."
-        )
-
+from agents.reply_triage.gmail_client import fetch_message
 from services.agent_state import get_state_service
 from services.db import get_db_service
 from services.knowledge_base import get_kb_service
 from services.llm import chat as llm_chat
-from services.proactive_engine import GateDecision
 
 logger = logging.getLogger("cruz.agents.reply_triage")
 
@@ -212,7 +204,8 @@ def _email_age_hours(date_header: str) -> int:
             dt = dt.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - dt
         return max(0, int(delta.total_seconds() / 3600))
-    except Exception:
+    except Exception as exc:
+        logger.debug("could not parse date header %r: %s", date_header, exc)
         return 0
 
 
@@ -276,6 +269,10 @@ def _parse_classification_json(text: str) -> dict:
     try:
         d = json.loads(text)
     except Exception:
+        logger.warning(
+            "classification JSON parse failed; defaulting to fyi/later. raw=%r",
+            text[:200],
+        )
         return {
             "label": "fyi",
             "urgency": "later",

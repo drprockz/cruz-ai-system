@@ -16,9 +16,6 @@ import os
 import re
 from typing import Any, List
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
 logger = logging.getLogger("cruz.agents.reply_triage.gmail_client")
 
 _USER_ID = "me"
@@ -26,6 +23,9 @@ _SERVICE_CACHE: Any = None
 
 
 def _get_service():
+    from google.oauth2.credentials import Credentials  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+
     global _SERVICE_CACHE
     if _SERVICE_CACHE is not None:
         return _SERVICE_CACHE

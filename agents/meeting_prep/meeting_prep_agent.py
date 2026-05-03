@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 
 from agents.base_agent import AgentInput, AgentOutput
 from agents.event_driven_agent import EventDrivenAgent
@@ -58,7 +57,6 @@ class MeetingPrepAgent(EventDrivenAgent):
             # Calendar webhook payload contains only headers + resource_state;
             # we always re-query the calendar for the upcoming-events window.
             event = input["context"].get("event", {}) or {}
-            _data = event.get("data", {}) or {}  # currently informational only
 
             events = await _fetch_upcoming_events(window_minutes=_WINDOW_UPPER_MIN)
             now_ts = time.time()

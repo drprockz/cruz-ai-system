@@ -46,9 +46,9 @@ _SEEN_TTL_SECONDS = 90 * 86400
 _SEEN_CAP = 1000
 _DEFAULT_USER_OFFERING = "freelance full-stack development services"
 _USER_OFFERING_ENV = "FUNDED_WATCHER_USER_OFFERING"
-_OFFERING_FALLBACK_ENV = "USER_OFFERING"
 _ICP_MODEL_ENV = "AGENT_MODEL_FUNDED_WATCHER"
 _ICP_DEFAULT_MODEL = "qwen2.5-coder:14b"
+_RSS_FETCH_TIMEOUT_SECONDS = 15
 
 
 class FundedWatcherAgent(EventDrivenAgent):
@@ -132,7 +132,7 @@ class FundedWatcherAgent(EventDrivenAgent):
             # Persist updated seen-set (capped, refreshed TTL).
             if new_urls:
                 # Most-recent at the end; cap to last _SEEN_CAP.
-                merged = [u for u in seen_list if u in seen_set]
+                merged = list(seen_list)
                 # Append any URLs that were not already in seen_list (preserving
                 # the original list's relative order) so we don't churn it.
                 existing = set(merged)
@@ -200,14 +200,30 @@ async def _fetch_rss(url: str) -> list[dict]:
     """Pull `url` via feedparser and return a list of normalised entries.
 
     Wraps the synchronous ``feedparser.parse`` call in ``asyncio.to_thread``
-    to keep the event loop free. Each returned dict has at minimum::
+    to keep the event loop free, and bounds it with
+    ``asyncio.wait_for(..., timeout=_RSS_FETCH_TIMEOUT_SECONDS)`` so a slow
+    or hung RSS host can't pin an ARQ worker thread indefinitely. On
+    timeout we log a warning and return ``[]`` — the per-feed try/except
+    in ``process()`` is the safety net for everything else.
+
+    Each returned dict has at minimum::
 
         {"url": str, "title": str, "summary": str, "published": str, "link": str}
 
     Tests monkey-patch this helper directly, so production wiring is
     deliberately small and side-effect-free.
     """
-    parsed = await asyncio.to_thread(feedparser.parse, url)
+    try:
+        parsed = await asyncio.wait_for(
+            asyncio.to_thread(feedparser.parse, url),
+            timeout=_RSS_FETCH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "_fetch_rss(%s) timed out after %ss",
+            url, _RSS_FETCH_TIMEOUT_SECONDS,
+        )
+        return []
     entries = getattr(parsed, "entries", None) or []
     out: list[dict] = []
     for e in entries:
@@ -267,18 +283,15 @@ async def _match_icp(article: dict, user_offering: str) -> bool:
 def _resolve_user_offering() -> str:
     """Return the configured user-offering string, falling back to a default.
 
-    Reads ``FUNDED_WATCHER_USER_OFFERING`` first, then ``USER_OFFERING``.
-    If neither is set, logs a one-shot warning and returns a sane default
-    so the agent doesn't no-op silently in dev.
+    Reads ``FUNDED_WATCHER_USER_OFFERING``. If unset, logs a one-shot
+    warning and returns a sane default so the agent doesn't no-op
+    silently in dev.
     """
-    val = (
-        os.environ.get(_USER_OFFERING_ENV)
-        or os.environ.get(_OFFERING_FALLBACK_ENV)
-    )
+    val = os.environ.get(_USER_OFFERING_ENV)
     if not val:
         logger.warning(
-            "FUNDED_WATCHER_USER_OFFERING (and USER_OFFERING) unset; "
-            "using default %r — set one for accurate ICP matching",
+            "FUNDED_WATCHER_USER_OFFERING unset; using default %r — set "
+            "it for accurate ICP matching",
             _DEFAULT_USER_OFFERING,
         )
         return _DEFAULT_USER_OFFERING

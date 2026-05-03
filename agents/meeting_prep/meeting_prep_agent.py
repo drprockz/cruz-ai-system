@@ -56,8 +56,6 @@ class MeetingPrepAgent(EventDrivenAgent):
         try:
             # Calendar webhook payload contains only headers + resource_state;
             # we always re-query the calendar for the upcoming-events window.
-            event = input["context"].get("event", {}) or {}
-
             events = await _fetch_upcoming_events(window_minutes=_WINDOW_UPPER_MIN)
             now_ts = time.time()
             window_lo = now_ts + _WINDOW_LOWER_MIN * 60

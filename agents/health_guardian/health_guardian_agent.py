@@ -76,8 +76,12 @@ class HealthGuardianAgent(EventDrivenAgent):
             if not entries:
                 return self._success(start, result={"status": "empty_journal"})
 
-            # Use the last 7 entries (newest-first) for streak computation.
-            recent = entries[:7]
+            # Sort newest-first defensively before slicing — _parse_journal
+            # returns entries in file order, but _compute_streaks counts from
+            # index 0 and treats it as the newest entry. If the user appends
+            # to the journal (oldest-first in file), an unsorted slice would
+            # look at the wrong end of history and could fire a stale streak.
+            recent = sorted(entries, key=lambda e: e["date"], reverse=True)[:7]
             streaks = _compute_streaks(recent)
 
             # Persist current streaks (info-only — useful for dashboard).
@@ -175,10 +179,12 @@ class HealthGuardianAgent(EventDrivenAgent):
 def _parse_journal(text: str) -> list[dict]:
     """Parse one-line-per-day journal text into a list of entries.
 
-    Returns entries in the same order as the file (most recent first
-    by convention). Lines that don't match the strict regex are skipped
-    silently — the journal format is owner-controlled and we don't want
-    to crash on a typo.
+    Returns entries in **file order** — no sorting is performed. The
+    caller is responsible for sorting if streak semantics depend on
+    order (see ``HealthGuardianAgent.process``, which sorts newest-first
+    before passing to ``_compute_streaks``). Lines that don't match the
+    strict regex are skipped silently — the journal format is owner-
+    controlled and we don't want to crash on a typo.
     """
     out: list[dict] = []
     for raw in text.splitlines():
@@ -199,11 +205,13 @@ def _parse_journal(text: str) -> list[dict]:
 
 
 def _compute_streaks(entries: list[dict]) -> dict[str, int]:
-    """Count consecutive Ns from the start of `entries` for each dimension.
+    """Count consecutive Ns from index 0 of ``entries`` for each dimension.
 
-    Entries are expected most-recent-first. Streaks reset on the first
-    Y, so the returned int is the count of Ns at the head of the list
-    in that dimension.
+    The function treats ``entries[0]`` as the newest entry and walks
+    forward, stopping at the first Y. The returned int is the count of
+    Ns at the head of the list in that dimension. The caller (currently
+    ``HealthGuardianAgent.process``) is responsible for guaranteeing
+    newest-first ordering before invoking this — see the sort there.
     """
     streaks: dict[str, int] = {}
     for dim in _DIMENSIONS:

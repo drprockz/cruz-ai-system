@@ -1,17 +1,20 @@
 """
 Thin Gmail API wrapper for Reply Triage and gmail-webhook task.
 
-Authentication uses the OAuth credentials at GMAIL_CREDENTIALS_PATH
-(already configured in v1 for ECHO/REACH agents). Tests monkey-patch
-the public functions; the underlying client is lazily constructed.
+Reads OAuth credentials from GMAIL_CREDENTIALS_PATH and GMAIL_TOKEN_PATH
+(introduced in SP5 — must be added to .env before Reply Triage / calibration
+can run). Tests monkey-patch the public functions; the underlying client
+is lazily constructed.
 """
 
 from __future__ import annotations
 
 import base64
+import html
 import logging
 import os
-from typing import Any, List, Optional
+import re
+from typing import Any, List
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -63,14 +66,30 @@ def _fetch_message_sync(message_id: str) -> dict:
     }
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
 def _extract_text_body(payload: dict) -> str:
-    """Walk MIME parts, return first text/plain (or text/html stripped) chunk."""
-    if payload.get("mimeType", "").startswith("text/"):
+    """Walk MIME parts; prefer text/plain, fall back to text/html with tags
+    stripped. Returns the empty string when no textual part is found."""
+    plain = _find_part_body(payload, "text/plain")
+    if plain:
+        return plain
+    raw_html = _find_part_body(payload, "text/html")
+    if raw_html:
+        return html.unescape(_HTML_TAG_RE.sub("", raw_html)).strip()
+    return ""
+
+
+def _find_part_body(payload: dict, mime: str) -> str:
+    """Recursively search payload for the first part whose mimeType
+    starts with `mime`. Returns the decoded text, or "" if none found."""
+    if payload.get("mimeType", "").startswith(mime):
         data = payload.get("body", {}).get("data", "")
         if data:
             return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
     for part in payload.get("parts", []) or []:
-        text = _extract_text_body(part)
+        text = _find_part_body(part, mime)
         if text:
             return text
     return ""

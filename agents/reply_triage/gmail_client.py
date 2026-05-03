@@ -1,0 +1,116 @@
+"""
+Thin Gmail API wrapper for Reply Triage and gmail-webhook task.
+
+Authentication uses the OAuth credentials at GMAIL_CREDENTIALS_PATH
+(already configured in v1 for ECHO/REACH agents). Tests monkey-patch
+the public functions; the underlying client is lazily constructed.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import os
+from typing import Any, List, Optional
+
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+logger = logging.getLogger("cruz.agents.reply_triage.gmail_client")
+
+_USER_ID = "me"
+_SERVICE_CACHE: Any = None
+
+
+def _get_service():
+    global _SERVICE_CACHE
+    if _SERVICE_CACHE is not None:
+        return _SERVICE_CACHE
+    creds_path = os.environ.get("GMAIL_CREDENTIALS_PATH", "")
+    token_path = os.environ.get("GMAIL_TOKEN_PATH", "")
+    if not creds_path or not token_path:
+        raise RuntimeError(
+            "GMAIL_CREDENTIALS_PATH/GMAIL_TOKEN_PATH not set — "
+            "Reply Triage cannot read Gmail"
+        )
+    creds = Credentials.from_authorized_user_file(token_path)
+    _SERVICE_CACHE = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return _SERVICE_CACHE
+
+
+async def fetch_message(message_id: str) -> dict:
+    """Return the parsed message envelope: {id, subject, from, date, body, thread_id}."""
+    import asyncio
+    return await asyncio.to_thread(_fetch_message_sync, message_id)
+
+
+def _fetch_message_sync(message_id: str) -> dict:
+    svc = _get_service()
+    msg = svc.users().messages().get(
+        userId=_USER_ID, id=message_id, format="full",
+    ).execute()
+    payload = msg.get("payload", {})
+    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+    body = _extract_text_body(payload)
+    return {
+        "id": msg["id"],
+        "thread_id": msg.get("threadId"),
+        "subject": headers.get("subject", ""),
+        "from": headers.get("from", ""),
+        "date": headers.get("date", ""),
+        "body": body,
+        "labelIds": msg.get("labelIds", []),
+    }
+
+
+def _extract_text_body(payload: dict) -> str:
+    """Walk MIME parts, return first text/plain (or text/html stripped) chunk."""
+    if payload.get("mimeType", "").startswith("text/"):
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+    for part in payload.get("parts", []) or []:
+        text = _extract_text_body(part)
+        if text:
+            return text
+    return ""
+
+
+async def fetch_history_since(history_id: str) -> List[str]:
+    """Return list of new message IDs since `history_id`."""
+    import asyncio
+    return await asyncio.to_thread(_fetch_history_sync, history_id)
+
+
+def _fetch_history_sync(history_id: str) -> List[str]:
+    svc = _get_service()
+    try:
+        history = svc.users().history().list(
+            userId=_USER_ID,
+            startHistoryId=history_id,
+            historyTypes=["messageAdded"],
+        ).execute()
+    except Exception as exc:
+        logger.warning("gmail history fetch failed: %s", exc)
+        return []
+    msg_ids: list[str] = []
+    for h in history.get("history", []):
+        for added in h.get("messagesAdded", []):
+            mid = added.get("message", {}).get("id")
+            if mid:
+                msg_ids.append(mid)
+    return msg_ids
+
+
+async def list_recent_inbound(limit: int = 50) -> List[str]:
+    """For the calibration script — returns latest `limit` inbound message IDs."""
+    import asyncio
+    return await asyncio.to_thread(_list_recent_sync, limit)
+
+
+def _list_recent_sync(limit: int) -> List[str]:
+    svc = _get_service()
+    res = svc.users().messages().list(
+        userId=_USER_ID, q="-from:me category:primary", maxResults=limit,
+    ).execute()
+    return [m["id"] for m in res.get("messages", [])]

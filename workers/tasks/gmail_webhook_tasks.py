@@ -26,19 +26,16 @@ logger = logging.getLogger("cruz.workers.gmail")
 async def _fetch_new_message_ids(history_id: str) -> List[str]:
     """Resolve a Gmail historyId to the list of new message IDs since.
 
-    Implementation note: real impl uses google-api-python-client.
-    This stub raises NotImplementedError so tests must monkey-patch it
-    explicitly. The real implementation lands in Chunk 6 alongside the
-    Reply Triage agent — that's the only agent that reads message bodies
-    in SP5, and the gmail-API integration is too large to land here.
+    Delegates to agents.reply_triage.gmail_client.fetch_history_since,
+    which wraps google-api-python-client. Tests in
+    tests/workers/test_gmail_webhook_tasks.py monkey-patch this function
+    directly, so the real client is not exercised there.
 
     See:
       https://developers.google.com/gmail/api/guides/sync#partial
     """
-    raise NotImplementedError(
-        "Gmail history fetch lands in Chunk 6 with the gmail client wrapper. "
-        "Tests should monkey-patch _fetch_new_message_ids."
-    )
+    from agents.reply_triage.gmail_client import fetch_history_since
+    return await fetch_history_since(history_id)
 
 
 async def process_gmail_webhook(

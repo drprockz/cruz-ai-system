@@ -26,7 +26,7 @@
 - `docs/perf/sp6-forge-improvement-test.md` — A/B test record for charter Gate 2.
 
 ### Modified files
-- `services/mac_controller.py` — promote `_APP_NAME_RE` → `APP_NAME_RE` and `_escape_applescript_string` → `escape_applescript_string` (with backward-compat aliases) + add `timeout` parameter to `_run_osascript`.
+- `services/mac_controller.py` — promote `_APP_NAME_RE` → `APP_NAME_RE`, `_escape_applescript_string` → `escape_applescript_string`, and `_run_osascript` → `run_osascript` (all three with backward-compat aliases) + add `timeout` parameter to `run_osascript`.
 - `tests/services/test_mac_controller.py` — update import to public `escape_applescript_string`.
 - `agents/cruz/cruz_agent.py` — add `screen_perception` tool, dispatch method, dispatch branch, active-app runtime-context injection (in both `process` and `stream_response`), stream-path tool events.
 - `PROGRESS.md` — append SP6 sign-off block at the end.
@@ -195,9 +195,9 @@ AppleScript. Backward-compat alias preserved.
 Spec: docs/superpowers/specs/2026-05-03-sp6-screen-perception-design.md §4"
 ```
 
-### Task 1.3: Add `timeout` parameter to `_run_osascript`
+### Task 1.3: Promote `_run_osascript` to public + add `timeout` parameter
 
-**Why:** `get_active_window` needs a tighter per-call timeout (1.0s instead of the existing 10s default) so the Step-1 + Step-2 osascript reads stay snappy. Existing callers don't pass `timeout` and continue to get 10s.
+**Why:** SP6's `screen_perception.py` calls this helper cross-module. Like the two helpers in tasks 1.1/1.2, importing the underscore-prefixed name across modules violates PEP 8 and hides the contract. We promote it to `run_osascript` (with a backward-compat private alias) at the same time as adding the `timeout` parameter — both changes are small and naturally co-located. The new parameter is needed because `get_active_window` wants a tighter 1.0s budget per call instead of the 10s default existing callers get.
 
 **Files:**
 - Modify: `services/mac_controller.py:192-214` (`_run_osascript` method)
@@ -209,7 +209,7 @@ Add to `tests/services/test_mac_controller.py` at the bottom of the file:
 ```python
 @pytest.mark.asyncio
 async def test_run_osascript_custom_timeout() -> None:
-    """_run_osascript respects a custom timeout, raising MacControllerError on overrun."""
+    """run_osascript respects a custom timeout, raising MacControllerError on overrun."""
     svc = MacControllerService()
     mock_proc = AsyncMock()
     mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
@@ -220,7 +220,22 @@ async def test_run_osascript_custom_timeout() -> None:
         new=AsyncMock(return_value=mock_proc),
     ):
         with pytest.raises(MacControllerError, match="timed out after 1.0s"):
-            await svc._run_osascript("return 1", timeout=1.0)
+            await svc.run_osascript("return 1", timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_run_osascript_private_alias_still_works() -> None:
+    """Backward-compat: existing callers using _run_osascript continue to work."""
+    svc = MacControllerService()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"ok\n", b""))
+    mock_proc.returncode = 0
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ):
+        result = await svc._run_osascript("return 1")
+    assert result == "ok\n"
 ```
 
 - [ ] **Step 2: Run test, verify it fails**
@@ -231,16 +246,18 @@ pytest tests/services/test_mac_controller.py::test_run_osascript_custom_timeout 
 
 Expected: FAIL with `TypeError: _run_osascript() got an unexpected keyword argument 'timeout'`.
 
-- [ ] **Step 3: Add the parameter to `_run_osascript`**
+- [ ] **Step 3: Promote to public name and add the parameter**
 
-In `services/mac_controller.py`, modify the signature and the `wait_for` call:
+In `services/mac_controller.py`, rename the method and add the `timeout` parameter. Old:
 
 ```python
-# Old signature:
 async def _run_osascript(self, script: str) -> str:
+```
 
-# New signature:
-async def _run_osascript(self, script: str, timeout: Optional[float] = None) -> str:
+New:
+
+```python
+async def run_osascript(self, script: str, timeout: Optional[float] = None) -> str:
     """Run a single AppleScript snippet, return stdout (str). Raise on error.
 
     timeout: optional override for the wait_for budget. Defaults to
@@ -248,10 +265,16 @@ async def _run_osascript(self, script: str, timeout: Optional[float] = None) -> 
     """
 ```
 
-Replace the existing `wait_for` line:
+Add a backward-compat alias just after the method body (still inside the class), so internal callers and any external code that imports the underscore form keeps working:
 
 ```python
-# Old:
+    # Backward-compat alias.
+    _run_osascript = run_osascript
+```
+
+Replace the existing `wait_for` line. Old:
+
+```python
 stdout_b, stderr_b = await asyncio.wait_for(
     proc.communicate(), timeout=_SUBPROCESS_TIMEOUT
 )
@@ -259,8 +282,11 @@ stdout_b, stderr_b = await asyncio.wait_for(
 raise MacControllerError(
     f"osascript timed out after {_SUBPROCESS_TIMEOUT}s"
 )
+```
 
-# New:
+New:
+
+```python
 effective_timeout = timeout if timeout is not None else _SUBPROCESS_TIMEOUT
 try:
     stdout_b, stderr_b = await asyncio.wait_for(
@@ -296,10 +322,12 @@ Expected: all tests pass (existing tests don't pass `timeout` so they get the 10
 
 ```bash
 git add services/mac_controller.py tests/services/test_mac_controller.py
-git commit -m "feat(mac_controller): add optional timeout parameter to _run_osascript
+git commit -m "feat(mac_controller): promote _run_osascript and add optional timeout
 
-SP6's get_active_window needs a 1s budget per AppleScript read instead
-of the default 10s. Existing callers unchanged.
+SP6's get_active_window calls this cross-module and needs a 1s budget
+per AppleScript read instead of the default 10s. Promotes to public
+run_osascript with backward-compat _run_osascript alias. Existing
+callers (still using the underscore form) unchanged.
 
 Spec: docs/superpowers/specs/2026-05-03-sp6-screen-perception-design.md §4"
 ```
@@ -633,13 +661,13 @@ def _step2_script(app_name: str) -> str:
         Returns stripped stdout. Raises MacControllerError on failure.
         """
         mac = get_mac_controller_service()
-        out = await mac._run_osascript(_STEP1_SCRIPT, timeout=_STEP_TIMEOUT_S)
+        out = await mac.run_osascript(_STEP1_SCRIPT, timeout=_STEP_TIMEOUT_S)
         return out.strip()
 
     async def _run_osascript_for_step2(self, app_name: str) -> str:
         """Run step-2 (window title) AppleScript. Internal — mocked by tests."""
         mac = get_mac_controller_service()
-        out = await mac._run_osascript(
+        out = await mac.run_osascript(
             _step2_script(app_name), timeout=_STEP_TIMEOUT_S
         )
         return out.strip()
@@ -841,7 +869,7 @@ async def test_get_active_window_app_name_regex_rejects_injection() -> None:
 pytest tests/services/test_screen_perception.py -v
 ```
 
-Expected: 14 tests pass (6 from chunk 1 + 8 new).
+Expected: 15 tests pass (6 from chunk 1 + 9 new).
 
 - [ ] **Step 5: Commit**
 
@@ -888,9 +916,15 @@ async def test_analyze_happy_path() -> None:
     # Mock active window
     aw_fixed = ActiveWindow(app="Code", window_title="hello.py", captured_at=1.0)
 
-    # Mock LLM response — duck-typed shape from anthropic_chat
+    # Mock LLM response — duck-typed shape from anthropic_chat.
+    # Use a deliberately bland string that no current OR foreseeable
+    # privacy_engine regex can match (no URLs, no credentials, no
+    # accounts, no key prefixes, no digit runs). This decouples the
+    # happy-path assertion from sanitize evolution; the dedicated
+    # test_analyze_sanitizes_output below exercises sanitize behavior.
+    bland_answer = "User is editing code."
     fake_response = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="Editing hello.py in VS Code.")],
+        content=[SimpleNamespace(type="text", text=bland_answer)],
         stop_reason="end_turn",
         usage=SimpleNamespace(input_tokens=100, output_tokens=20),
     )
@@ -908,7 +942,7 @@ async def test_analyze_happy_path() -> None:
         result = await svc.analyze()
 
     assert isinstance(result, ScreenAnalysis)
-    assert result.answer == "Editing hello.py in VS Code."
+    assert result.answer == bland_answer
     assert result.active_window is aw_fixed
     assert result.image_bytes_len == len(fake_png)
     assert result.tokens_used == 120
@@ -1259,7 +1293,7 @@ async def test_analyze_empty_text_response_returns_empty_string() -> None:
 pytest tests/services/test_screen_perception.py -v
 ```
 
-Expected: 21 tests pass (14 from chunks 1-2 + 7 new).
+Expected: 23 tests pass (15 from chunks 1-2 + 8 new).
 
 - [ ] **Step 3: Commit**
 
@@ -1697,6 +1731,73 @@ async def test_process_runtime_context_omits_active_app_on_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_runtime_context_omits_on_timeout() -> None:
+    """If get_active_window hangs > 2s, wait_for cancels and the
+    'Active app:' line is omitted. This is the load-bearing latency
+    test for spec §5 (voice-mode ~3.6s SLO must not regress)."""
+    cruz = CruzAgent()
+
+    captured_system: dict = {}
+
+    from types import SimpleNamespace
+
+    async def fake_llm_chat(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    async def hang_forever() -> ActiveWindow:
+        await asyncio.sleep(60)   # cancelled by wait_for(timeout=2.0)
+        return ActiveWindow(app="never", window_title=None, captured_at=0.0)
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat",
+        new=AsyncMock(side_effect=fake_llm_chat),
+    ), patch(
+        # Speed up the test — patch the wait_for budget so we don't
+        # actually wait 2 real seconds. Verifies the cancellation path
+        # without slowing the suite.
+        "agents.cruz.cruz_agent.asyncio.wait_for",
+        new=AsyncMock(side_effect=asyncio.TimeoutError()),
+    ):
+        mock_get_sp.return_value.get_active_window = hang_forever
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        out = await cruz.process({
+            "task": "hi",
+            "context": {},
+            "trace_id": "t1",
+            "conversation_id": "c1",
+        })
+
+    # Request still completes
+    assert out["success"] is True
+    # No active-app line in the system prompt
+    assert "Active app:" not in captured_system["value"]
+
+
+@pytest.mark.asyncio
 async def test_process_runtime_context_omits_when_disabled_via_env(monkeypatch) -> None:
     """CRUZ_DISABLE_ACTIVE_APP=1 short-circuits the injection (used for
     Gate 2 control runs in the exit-gate test plan)."""
@@ -1763,7 +1864,23 @@ pytest tests/agents/test_cruz_screen_perception.py -v -k runtime_context
 
 Expected: FAIL — `assert "- Active app: Code — x.py" in sys_prompt` is False (the line isn't there yet).
 
-- [ ] **Step 3: Add the injection in `process()`**
+- [ ] **Step 3a: Add `import asyncio` to `agents/cruz/cruz_agent.py`**
+
+The runtime-context injection in Step 3b uses `asyncio.wait_for` and `asyncio.TimeoutError`. Confirm with:
+
+```bash
+grep -n '^import asyncio\|^from asyncio' agents/cruz/cruz_agent.py
+```
+
+If no hits, add `import asyncio` to the top-level imports. Place it just below `import logging` (alphabetical with the other stdlib imports). Run a quick sanity check:
+
+```bash
+python -c "import agents.cruz.cruz_agent"
+```
+
+Expected: no error. If `NameError` or `ImportError`, fix before proceeding.
+
+- [ ] **Step 3b: Add the injection in `process()`**
 
 In `agents/cruz/cruz_agent.py`, find the `runtime_context = (...)` block in `process()` (around line 610-618). Just AFTER that block (BEFORE `system_prompt = _SYSTEM_PROMPT + runtime_context`), add:
 
@@ -1789,7 +1906,7 @@ In `agents/cruz/cruz_agent.py`, find the `runtime_context = (...)` block in `pro
                     )
 ```
 
-Note: `asyncio` and `os` are already imported at the top of the file. Confirm before relying on it; if `asyncio` is not imported, add `import asyncio` near the existing top-level imports.
+Note: `os` is already imported. `asyncio` was added in Step 3a above.
 
 - [ ] **Step 4: Run the runtime-context tests, verify pass**
 
@@ -1797,7 +1914,9 @@ Note: `asyncio` and `os` are already imported at the top of the file. Confirm be
 pytest tests/agents/test_cruz_screen_perception.py -v -k runtime_context
 ```
 
-Expected: 3 tests pass (active app present, omitted on failure, omitted on env flag).
+Expected: 4 tests pass (active app present, omitted on failure, omitted on timeout, omitted on env flag).
+
+**Note on `test_persona_not_bypassed`:** spec §9 lists this as an integration test. The persona augmentation already has its own dedicated test coverage in `tests/agents/test_cruz_persona*.py` (existing); the Step 5 regression-suite run below validates that those tests stay green after SP6's wiring changes. We deliberately skip a duplicate test here — sign-off documents this deviation in Task 5.5.
 
 - [ ] **Step 5: Run wider CRUZ test suite to confirm no regressions**
 
@@ -2134,6 +2253,14 @@ Live tier — runs only on the Mac Mini with CRUZ_LIVE_MAC_TESTS=1.
 These tests hit real osascript / screencapture / Claude Vision.
 Skipped in CI. Run manually before SP6 sign-off.
 
+⚠️  PRIVACY WARNING: these tests upload a screenshot of the operator's
+ACTUAL Mac screen to Anthropic. Before running:
+  • Close any browser tab / window with personal or sensitive data
+    (banking, password manager, private chats, draft emails).
+  • Lock or hide notification banners that may pop in mid-test.
+  • Do NOT run on a screen showing client data unless you have
+    consent.
+
 Usage:
     CRUZ_LIVE_MAC_TESTS=1 ANTHROPIC_API_KEY=... \\
         pytest tests/services/test_screen_perception_live.py -v
@@ -2199,6 +2326,8 @@ pytest tests/services/test_screen_perception_live.py -v
 Expected: 3 tests skipped with reason "live mac tests disabled".
 
 - [ ] **Step 3: Run live on the Mac Mini (operator step)**
+
+⚠️ Before running, close any browser tab / window with personal or sensitive data — the screenshot is uploaded to Anthropic.
 
 On the Mac Mini, with the worktree checked out:
 
@@ -2307,7 +2436,7 @@ Append to `PROGRESS.md` once all four gates are ticked:
 ✅ Gate 4: P95 /command latency within +<X>ms of baseline
 
 Branch: claude/silly-goldwasser-aac011 → merged to main
-Tests added: 21 unit + 8 CRUZ integration + 3 live (env-gated)
+Tests added: 23 unit + 11 CRUZ integration + 3 live (env-gated)
 Files added: services/screen_perception.py + 4 test/doc files
 Files modified: agents/cruz/cruz_agent.py + services/mac_controller.py (refactor)
 ```
@@ -2467,7 +2596,7 @@ Append to `PROGRESS.md` (use today's date in YYYY-MM-DD form):
    (see docs/perf/load_results.md)
 
 Branch: claude/silly-goldwasser-aac011 → merged to main
-Tests added: 21 unit + 8 CRUZ integration + 3 live (env-gated)
+Tests added: 23 unit + 11 CRUZ integration + 3 live (env-gated)
 Files added:
   - services/screen_perception.py
   - tests/services/test_screen_perception.py
@@ -2534,8 +2663,8 @@ gh pr create --title "feat(sp6): on-demand screen perception with active-app con
 
 ## Test plan
 
-- [x] 21 unit tests in `tests/services/test_screen_perception.py`
-- [x] 8 integration tests in `tests/agents/test_cruz_screen_perception.py`
+- [x] 23 unit tests in `tests/services/test_screen_perception.py`
+- [x] 11 integration tests in `tests/agents/test_cruz_screen_perception.py`
 - [x] 3 live-tier tests env-gated `CRUZ_LIVE_MAC_TESTS=1`
 - [x] Refactor: `_APP_NAME_RE` → `APP_NAME_RE` and
   `_escape_applescript_string` → `escape_applescript_string` in

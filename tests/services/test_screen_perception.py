@@ -277,3 +277,183 @@ async def test_analyze_happy_path() -> None:
     call = mock_llm.await_args
     assert call.kwargs["backend"] == "anthropic"
     assert call.kwargs["model"] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_failure_raises() -> None:
+    """mac.screenshot raising MacControllerError → ScreenPerceptionError."""
+    svc = ScreenPerceptionService()
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac:
+        mock_mac.return_value.screenshot = AsyncMock(
+            side_effect=MacControllerError("screencapture: error 1")
+        )
+        with pytest.raises(ScreenPerceptionError, match="screenshot failed"):
+            await svc.analyze()
+
+
+@pytest.mark.asyncio
+async def test_analyze_vision_failure_raises() -> None:
+    """llm.chat raising → ScreenPerceptionError('vision call failed: ...')."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(side_effect=RuntimeError("anthropic: 503")),
+    ):
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        with pytest.raises(ScreenPerceptionError, match="vision call failed"):
+            await svc.analyze()
+
+
+@pytest.mark.asyncio
+async def test_analyze_default_question_uses_canonical_prompt() -> None:
+    """When question=None, the canonical prompt template is used."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ) as mock_llm:
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        await svc.analyze()
+    msgs = mock_llm.await_args.kwargs["messages"]
+    text_block = next(b for b in msgs[0]["content"] if b["type"] == "text")
+    assert "currently working on" in text_block["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_analyze_custom_question_passed_through() -> None:
+    """Custom question appears verbatim in the Vision prompt."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ) as mock_llm:
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        await svc.analyze(question="What error is shown in the terminal?")
+    msgs = mock_llm.await_args.kwargs["messages"]
+    text_block = next(b for b in msgs[0]["content"] if b["type"] == "text")
+    assert text_block["text"] == "What error is shown in the terminal?"
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_content_block_shape() -> None:
+    """Image content block: type=image, source.type=base64,
+    media_type=image/png, data is STANDARD base64 (not URL-safe)."""
+    import base64 as _b64
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    # Use bytes that produce '+' or '/' in standard base64 (so URL-safe
+    # variant would have '-' or '_' instead — assertable difference).
+    png = bytes(range(256))
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ) as mock_llm:
+        mock_mac.return_value.screenshot = AsyncMock(return_value=png)
+        await svc.analyze()
+    msgs = mock_llm.await_args.kwargs["messages"]
+    image_block = msgs[0]["content"][0]
+    assert image_block["type"] == "image"
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/png"
+    data = image_block["source"]["data"]
+    # Standard base64 alphabet uses '+' and '/'. URL-safe uses '-' and '_'.
+    assert "_" not in data and "-" not in data
+    # Round-trip: standard_b64decode must equal the original bytes.
+    assert _b64.standard_b64decode(data) == png
+
+
+@pytest.mark.asyncio
+async def test_analyze_sanitizes_output() -> None:
+    """Vision answer containing a URL password is sanitized in result.answer."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    leaky = "Connection: postgres://user:topsecret@db/cruz"
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=leaky)],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ):
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        result = await svc.analyze()
+    assert "topsecret" not in result.answer
+    assert "[REDACTED_PW]" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_analyze_empty_text_response_returns_empty_string() -> None:
+    """If Vision returns no text block (refusal / weird), answer is ''
+    and the call still succeeds (caller decides what to do)."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    fake_response = SimpleNamespace(
+        content=[],   # no text blocks
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=0),
+    )
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ):
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        result = await svc.analyze()
+    assert result.answer == ""

@@ -195,22 +195,27 @@ class MacControllerService:
 
     # ── Internal subprocess runner ────────────────────────────────────
 
-    async def _run_osascript(self, script: str) -> str:
-        """Run a single AppleScript snippet, return stdout (str). Raise on error."""
+    async def run_osascript(self, script: str, timeout: Optional[float] = None) -> str:
+        """Run a single AppleScript snippet, return stdout (str). Raise on error.
+
+        timeout: optional override for the wait_for budget. Defaults to
+        _SUBPROCESS_TIMEOUT (10s) for backward compatibility.
+        """
         proc = await asyncio.create_subprocess_exec(
             "osascript", "-e", script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        effective_timeout = timeout if timeout is not None else _SUBPROCESS_TIMEOUT
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=_SUBPROCESS_TIMEOUT
+                proc.communicate(), timeout=effective_timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise MacControllerError(
-                f"osascript timed out after {_SUBPROCESS_TIMEOUT}s"
+                f"osascript timed out after {effective_timeout}s"
             )
 
         if proc.returncode != 0:
@@ -218,3 +223,6 @@ class MacControllerService:
             raise MacControllerError(err or "osascript returned non-zero")
 
         return stdout_b.decode("utf-8", errors="replace")
+
+    # Backward-compat alias.
+    _run_osascript = run_osascript

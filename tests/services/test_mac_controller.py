@@ -301,3 +301,34 @@ async def test_calendar_create_local_propagates_error() -> None:
                 start_iso="2026-05-01T10:00:00",
                 end_iso="2026-05-01T11:00:00",
             )
+
+
+@pytest.mark.asyncio
+async def test_run_osascript_custom_timeout() -> None:
+    """run_osascript respects a custom timeout, raising MacControllerError on overrun."""
+    svc = MacControllerService()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+    mock_proc.kill = lambda: None
+    mock_proc.wait = AsyncMock(return_value=0)
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ):
+        with pytest.raises(MacControllerError, match="timed out after 1.0s"):
+            await svc.run_osascript("return 1", timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_run_osascript_private_alias_still_works() -> None:
+    """Backward-compat: existing callers using _run_osascript continue to work."""
+    svc = MacControllerService()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"ok\n", b""))
+    mock_proc.returncode = 0
+    with patch(
+        "services.mac_controller.asyncio.create_subprocess_exec",
+        new=AsyncMock(return_value=mock_proc),
+    ):
+        result = await svc._run_osascript("return 1")
+    assert result == "ok\n"

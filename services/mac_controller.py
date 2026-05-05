@@ -63,7 +63,7 @@ def _iso_to_applescript_date(iso: str) -> str:
     return f'date "{formatted}"'
 
 
-def _escape_applescript_string(raw: str) -> str:
+def escape_applescript_string(raw: str) -> str:
     """Escape a Python string for safe inclusion inside an AppleScript double-quoted string.
 
     AppleScript string literals don't support \\n / \\t escapes — newlines and
@@ -74,6 +74,10 @@ def _escape_applescript_string(raw: str) -> str:
     out = raw.replace("\\", "\\\\").replace('"', '\\"')
     out = out.replace("\n", '" & return & "').replace("\t", '" & tab & "')
     return out
+
+
+# Backward-compat alias — internal callers may keep using the leading-underscore form.
+_escape_applescript_string = escape_applescript_string
 
 
 class MacControllerService:
@@ -126,7 +130,7 @@ class MacControllerService:
 
     async def clipboard_write(self, text: str) -> None:
         """Replace the clipboard with the given text."""
-        text_esc = _escape_applescript_string(text)
+        text_esc = escape_applescript_string(text)
         await self._run_osascript(f'set the clipboard to "{text_esc}"')
 
     async def open_app(self, name: str) -> None:
@@ -141,8 +145,8 @@ class MacControllerService:
 
     async def notify(self, title: str, body: str, sound: bool = False) -> None:
         """Fire a macOS Notification Center banner."""
-        title_esc = _escape_applescript_string(title)
-        body_esc = _escape_applescript_string(body)
+        title_esc = escape_applescript_string(title)
+        body_esc = escape_applescript_string(body)
         script = f'display notification "{body_esc}" with title "{title_esc}"'
         if sound:
             script += ' sound name "Submarine"'
@@ -172,8 +176,8 @@ class MacControllerService:
         Calendar.app requires AppleScript date literals — we build them with
         `date "<MM/DD/YYYY HH:MM:SS>"` form which AppleScript parses unambiguously.
         """
-        title_esc = _escape_applescript_string(title)
-        cal_esc = _escape_applescript_string(calendar_name)
+        title_esc = escape_applescript_string(title)
+        cal_esc = escape_applescript_string(calendar_name)
         start_as = _iso_to_applescript_date(start_iso)
         end_as = _iso_to_applescript_date(end_iso)
 

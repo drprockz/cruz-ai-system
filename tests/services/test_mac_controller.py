@@ -10,7 +10,7 @@ import pytest
 from services.mac_controller import (
     MacControllerError,
     MacControllerService,
-    _escape_applescript_string,
+    escape_applescript_string,
     get_mac_controller_service,
 )
 
@@ -31,7 +31,7 @@ from services.mac_controller import (
     ],
 )
 def test_escape_applescript_string(raw: str, expected: str) -> None:
-    assert _escape_applescript_string(raw) == expected
+    assert escape_applescript_string(raw) == expected
 
 
 def test_singleton_returns_same_instance() -> None:

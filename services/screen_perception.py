@@ -18,11 +18,13 @@ Spec: docs/superpowers/specs/2026-05-03-sp6-screen-perception-design.md
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
 
+from services.llm import chat as llm_chat
 from services.mac_controller import (
     APP_NAME_RE,
     MacControllerError,
@@ -35,6 +37,21 @@ logger = logging.getLogger("cruz.services.screen_perception")
 # Per-step osascript timeout. Total wall-clock budget enforced by
 # asyncio.wait_for in the runtime-context injection path (2s).
 _STEP_TIMEOUT_S = 1.0
+
+# Vision call configuration (analyze path).
+_VISION_MODEL = "claude-sonnet-4-6"
+_VISION_BACKEND = "anthropic"
+_VISION_SYSTEM = (
+    "You analyze a screenshot of the user's Mac desktop and answer "
+    "concisely, in plain prose, no markdown."
+)
+_DEFAULT_QUESTION = (
+    "Look at this screenshot of a Mac desktop and tell me concisely "
+    "what the user is currently working on. Mention the active app, "
+    "the file or document if visible, and any obvious task in progress. "
+    "Two sentences max."
+)
+_VISION_MAX_TOKENS = 400
 
 # AppleScript snippets — kept module-level for testability.
 _STEP1_SCRIPT = (
@@ -130,6 +147,17 @@ def get_screen_perception_service() -> "ScreenPerceptionService":
     return _instance
 
 
+def _extract_text(content) -> str:
+    """Extract plain text from an Anthropic content-block list. Returns
+    '' if no text block present."""
+    if not content:
+        return ""
+    for block in content:
+        if getattr(block, "type", None) == "text":
+            return getattr(block, "text", "") or ""
+    return ""
+
+
 class ScreenPerceptionService:
     """Two public async methods. See module docstring."""
 
@@ -194,5 +222,66 @@ class ScreenPerceptionService:
         )
 
     async def analyze(self, question: Optional[str] = None) -> ScreenAnalysis:
-        """Implemented in Chunk 3."""
-        raise NotImplementedError("Chunk 3 deliverable")
+        start = time.monotonic()
+
+        # 1. Screenshot
+        mac = get_mac_controller_service()
+        try:
+            png_bytes = await mac.screenshot()
+        except MacControllerError as exc:
+            raise ScreenPerceptionError(f"screenshot failed: {exc}") from exc
+
+        # 2. Active window (best-effort; never raises)
+        active = await self.get_active_window()
+
+        # 3. Vision call (Anthropic backend pinned)
+        prompt = question or _DEFAULT_QUESTION
+        b64_png = base64.standard_b64encode(png_bytes).decode("ascii")
+        try:
+            response = await llm_chat(
+                system=_VISION_SYSTEM,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64_png,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                max_tokens=_VISION_MAX_TOKENS,
+                backend=_VISION_BACKEND,
+                model=_VISION_MODEL,
+            )
+        except Exception as exc:
+            raise ScreenPerceptionError(f"vision call failed: {exc}") from exc
+
+        # 4. Extract text + sanitize
+        raw_answer = _extract_text(response.content)
+        try:
+            from agents.cruz.persona.privacy_engine import sanitize
+            answer = sanitize(raw_answer)
+        except Exception as exc:
+            logger.warning("sanitize failed (returning raw text): %s", exc)
+            answer = raw_answer
+
+        # 5. Build result
+        usage = getattr(response, "usage", None)
+        tokens = 0
+        if usage is not None:
+            tokens = (
+                getattr(usage, "input_tokens", 0) or 0
+            ) + (getattr(usage, "output_tokens", 0) or 0)
+
+        return ScreenAnalysis(
+            answer=answer,
+            active_window=active,
+            image_bytes_len=len(png_bytes),
+            duration_ms=int((time.monotonic() - start) * 1000),
+            tokens_used=tokens,
+        )

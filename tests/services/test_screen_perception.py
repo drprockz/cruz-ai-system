@@ -227,3 +227,53 @@ async def test_get_active_window_app_name_regex_rejects_injection() -> None:
         step2.assert_not_called()
     finally:
         sp_mod.WINDOW_TITLE_ALLOWLIST = original
+
+
+@pytest.mark.asyncio
+async def test_analyze_happy_path() -> None:
+    """analyze() returns a ScreenAnalysis with sanitized answer + window metadata."""
+    from types import SimpleNamespace
+    svc = ScreenPerceptionService()
+
+    # Mock mac_controller.screenshot
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+
+    # Mock active window
+    aw_fixed = ActiveWindow(app="Code", window_title="hello.py", captured_at=1.0)
+
+    # Mock LLM response — duck-typed shape from anthropic_chat.
+    # Use a deliberately bland string that no current OR foreseeable
+    # privacy_engine regex can match (no URLs, no credentials, no
+    # accounts, no key prefixes, no digit runs). This decouples the
+    # happy-path assertion from sanitize evolution; the dedicated
+    # test_analyze_sanitizes_output below exercises sanitize behavior.
+    bland_answer = "User is editing code."
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=bland_answer)],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=100, output_tokens=20),
+    )
+
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw_fixed),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ) as mock_llm:
+        mock_mac.return_value.screenshot = AsyncMock(return_value=fake_png)
+        result = await svc.analyze()
+
+    assert isinstance(result, ScreenAnalysis)
+    assert result.answer == bland_answer
+    assert result.active_window is aw_fixed
+    assert result.image_bytes_len == len(fake_png)
+    assert result.tokens_used == 120
+    assert result.duration_ms >= 0
+
+    # Verify llm.chat was called with anthropic backend + sonnet model
+    call = mock_llm.await_args
+    assert call.kwargs["backend"] == "anthropic"
+    assert call.kwargs["model"] == "claude-sonnet-4-6"

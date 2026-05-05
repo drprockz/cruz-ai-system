@@ -32,7 +32,9 @@ _SUBPROCESS_TIMEOUT = 10.0
 
 # Allowed characters for app names — defends against AppleScript injection
 # via the open_app primitive. Letters, digits, spaces, dots, hyphens, underscores.
-_APP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
+APP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
+# Backward-compat alias.
+_APP_NAME_RE = APP_NAME_RE
 
 
 class MacControllerError(RuntimeError):
@@ -136,10 +138,10 @@ class MacControllerService:
     async def open_app(self, name: str) -> None:
         """Activate (launch + foreground) a macOS app by name.
 
-        App name is validated against _APP_NAME_RE to defend against
+        App name is validated against APP_NAME_RE to defend against
         AppleScript injection through this primitive.
         """
-        if not _APP_NAME_RE.match(name):
+        if not APP_NAME_RE.match(name):
             raise MacControllerError(f"invalid app name: {name!r}")
         await self._run_osascript(f'tell application "{name}" to activate')
 

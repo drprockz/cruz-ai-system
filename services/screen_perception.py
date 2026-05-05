@@ -258,12 +258,13 @@ class ScreenPerceptionService:
                 backend=_VISION_BACKEND,
                 model=_VISION_MODEL,
             )
-        except Exception as exc:
+        except Exception as exc:  # broad: SDK exception surface (anthropic/httpx/pydantic) is unstable; wrap uniformly
             raise ScreenPerceptionError(f"vision call failed: {exc}") from exc
 
         # 4. Extract text + sanitize
         raw_answer = _extract_text(response.content)
         try:
+            # Imported lazily to avoid a services/ → agents/ import-time coupling.
             from agents.cruz.persona.privacy_engine import sanitize
             answer = sanitize(raw_answer)
         except Exception as exc:

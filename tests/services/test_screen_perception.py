@@ -457,3 +457,36 @@ async def test_analyze_empty_text_response_returns_empty_string() -> None:
         mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
         result = await svc.analyze()
     assert result.answer == ""
+
+
+@pytest.mark.asyncio
+async def test_analyze_sanitize_failure_falls_through_to_raw_text(caplog) -> None:
+    """If sanitize raises, the call still succeeds and answer = raw text;
+    a warning is logged. Verifies the privacy-degraded-mode fallback."""
+    from types import SimpleNamespace
+    import logging
+    svc = ScreenPerceptionService()
+    aw = ActiveWindow(app="X", window_title=None, captured_at=0.0)
+    fake_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="raw vision answer")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    with patch(
+        "services.screen_perception.get_mac_controller_service",
+    ) as mock_mac, patch.object(
+        svc, "get_active_window",
+        new=AsyncMock(return_value=aw),
+    ), patch(
+        "services.screen_perception.llm_chat",
+        new=AsyncMock(return_value=fake_response),
+    ), patch(
+        "agents.cruz.persona.privacy_engine.sanitize",
+        side_effect=RuntimeError("regex compile failed"),
+    ):
+        mock_mac.return_value.screenshot = AsyncMock(return_value=b"\x89PNG")
+        with caplog.at_level(logging.WARNING, logger="cruz.services.screen_perception"):
+            result = await svc.analyze()
+    assert result.answer == "raw vision answer"   # raw text, NOT sanitized
+    # A warning was logged about the sanitize failure
+    assert any("sanitize" in record.message.lower() for record in caplog.records)

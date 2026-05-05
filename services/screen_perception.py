@@ -17,12 +17,50 @@ Spec: docs/superpowers/specs/2026-05-03-sp6-screen-perception-design.md
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
 
+from services.mac_controller import (
+    APP_NAME_RE,
+    MacControllerError,
+    escape_applescript_string,
+    get_mac_controller_service,
+)
+
 logger = logging.getLogger("cruz.services.screen_perception")
+
+# Per-step osascript timeout. Total wall-clock budget enforced by
+# asyncio.wait_for in the runtime-context injection path (2s).
+_STEP_TIMEOUT_S = 1.0
+
+# AppleScript snippets — kept module-level for testability.
+_STEP1_SCRIPT = (
+    'tell application "System Events"\n'
+    '  set frontApp to name of first process whose frontmost is true\n'
+    'end tell\n'
+    'return frontApp'
+)
+
+
+def _step2_script(app_name: str) -> str:
+    """Build step-2 script with the app name interpolated. Caller MUST
+    have validated app_name against APP_NAME_RE before calling."""
+    app_esc = escape_applescript_string(app_name)
+    return (
+        'tell application "System Events"\n'
+        f'  tell process "{app_esc}"\n'
+        '    try\n'
+        '      set winName to name of front window\n'
+        '    on error\n'
+        '      set winName to ""\n'
+        '    end try\n'
+        '  end tell\n'
+        'end tell\n'
+        'return winName'
+    )
 
 # Module-level singleton
 _instance: Optional["ScreenPerceptionService"] = None
@@ -95,9 +133,58 @@ def get_screen_perception_service() -> "ScreenPerceptionService":
 class ScreenPerceptionService:
     """Two public async methods. See module docstring."""
 
+    async def _run_osascript_for_step1(self) -> str:
+        """Run step-1 (frontmost app) AppleScript. Internal — mocked by tests.
+
+        Returns stripped stdout. Raises MacControllerError on failure.
+        """
+        mac = get_mac_controller_service()
+        out = await mac.run_osascript(_STEP1_SCRIPT, timeout=_STEP_TIMEOUT_S)
+        return out.strip()
+
+    async def _run_osascript_for_step2(self, app_name: str) -> str:
+        """Run step-2 (window title) AppleScript. Internal — mocked by tests."""
+        mac = get_mac_controller_service()
+        out = await mac.run_osascript(
+            _step2_script(app_name), timeout=_STEP_TIMEOUT_S
+        )
+        return out.strip()
+
     async def get_active_window(self) -> ActiveWindow:
-        """Implemented in Chunk 2."""
-        raise NotImplementedError("Chunk 2 deliverable")
+        captured_at = time.monotonic()
+
+        # Step 1 — frontmost process name. Never raises out of this method.
+        try:
+            app_name = await self._run_osascript_for_step1()
+        except Exception as exc:
+            logger.warning("get_active_window step-1 failed: %s", exc)
+            return ActiveWindow(app="unknown", window_title=None, captured_at=captured_at)
+
+        if not app_name:
+            return ActiveWindow(app="unknown", window_title=None, captured_at=captured_at)
+
+        # Step 2 — only if allowlisted AND app name passes injection-defense regex.
+        if app_name not in WINDOW_TITLE_ALLOWLIST:
+            return ActiveWindow(app=app_name, window_title=None, captured_at=captured_at)
+
+        if not APP_NAME_RE.match(app_name):
+            logger.warning(
+                "get_active_window: allowlisted app %r failed APP_NAME_RE; skipping step-2",
+                app_name,
+            )
+            return ActiveWindow(app=app_name, window_title=None, captured_at=captured_at)
+
+        try:
+            title = await self._run_osascript_for_step2(app_name)
+        except Exception as exc:
+            logger.warning("get_active_window step-2 failed for %r: %s", app_name, exc)
+            return ActiveWindow(app=app_name, window_title=None, captured_at=captured_at)
+
+        return ActiveWindow(
+            app=app_name,
+            window_title=title or None,   # empty string → None
+            captured_at=captured_at,
+        )
 
     async def analyze(self, question: Optional[str] = None) -> ScreenAnalysis:
         """Implemented in Chunk 3."""

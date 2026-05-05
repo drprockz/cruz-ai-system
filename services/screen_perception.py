@@ -136,6 +136,10 @@ class ScreenPerceptionService:
     async def _run_osascript_for_step1(self) -> str:
         """Run step-1 (frontmost app) AppleScript. Internal — mocked by tests.
 
+        Exists as a separate method (not inlined) so tests can mock at this
+        boundary via patch.object(svc, ...) instead of reaching through the
+        mac_controller singleton.
+
         Returns stripped stdout. Raises MacControllerError on failure.
         """
         mac = get_mac_controller_service()
@@ -143,7 +147,10 @@ class ScreenPerceptionService:
         return out.strip()
 
     async def _run_osascript_for_step2(self, app_name: str) -> str:
-        """Run step-2 (window title) AppleScript. Internal — mocked by tests."""
+        """Run step-2 (window title) AppleScript.
+
+        Internal — mocked by tests; see step1 docstring for rationale.
+        """
         mac = get_mac_controller_service()
         out = await mac.run_osascript(
             _step2_script(app_name), timeout=_STEP_TIMEOUT_S
@@ -151,12 +158,12 @@ class ScreenPerceptionService:
         return out.strip()
 
     async def get_active_window(self) -> ActiveWindow:
-        captured_at = time.monotonic()
+        captured_at = time.monotonic()  # monotonic — duration anchor only, not wall-clock
 
         # Step 1 — frontmost process name. Never raises out of this method.
         try:
             app_name = await self._run_osascript_for_step1()
-        except Exception as exc:
+        except (MacControllerError, asyncio.TimeoutError) as exc:
             logger.warning("get_active_window step-1 failed: %s", exc)
             return ActiveWindow(app="unknown", window_title=None, captured_at=captured_at)
 
@@ -176,7 +183,7 @@ class ScreenPerceptionService:
 
         try:
             title = await self._run_osascript_for_step2(app_name)
-        except Exception as exc:
+        except (MacControllerError, asyncio.TimeoutError) as exc:
             logger.warning("get_active_window step-2 failed for %r: %s", app_name, exc)
             return ActiveWindow(app=app_name, window_title=None, captured_at=captured_at)
 

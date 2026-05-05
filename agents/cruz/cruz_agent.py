@@ -46,6 +46,10 @@ from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
 from services.knowledge_base import get_kb_service
 from services.mac_controller import MacControllerError, get_mac_controller_service
+from services.screen_perception import (
+    ScreenPerceptionError,
+    get_screen_perception_service,
+)
 from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
@@ -939,6 +943,10 @@ class CruzAgent(BaseAgent):
 
         Returns an error AgentOutput if the tool name is unrecognised.
         """
+        # Screen perception (services/screen_perception.py)
+        if tool_name == "screen_perception":
+            return await self._dispatch_screen_perception_tool(tool_input, trace_id)
+
         # ── Mac Controller dispatch (services, not agents) ─────────────
         if tool_name.startswith("mac_"):
             return await self._dispatch_mac_tool(tool_name, tool_input, trace_id)
@@ -1031,6 +1039,39 @@ class CruzAgent(BaseAgent):
             tokens_used=0,
             error=None,
             requires_approval=False, approval_prompt=None,
+        )
+
+    async def _dispatch_screen_perception_tool(
+        self,
+        tool_input: Dict[str, Any],
+        trace_id: str,
+    ) -> AgentOutput:
+        """Route the screen_perception tool to ScreenPerceptionService.analyze.
+
+        Returns AgentOutput with `result` as the sanitized answer string
+        (NOT a dict) so that record_agent_activity's str(result)[:200]
+        path persists only sanitized text — see spec §6 'Why a plain
+        string, not a dict'.
+        """
+        start = time.monotonic()
+        sp = get_screen_perception_service()
+        try:
+            analysis = await sp.analyze(question=tool_input.get("question"))
+        except ScreenPerceptionError as exc:
+            return AgentOutput(
+                success=False, result=None, agent=self.name,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                tokens_used=0, error=str(exc),
+                requires_approval=False, approval_prompt=None,
+            )
+
+        return AgentOutput(
+            success=True,
+            result=analysis.answer,                # plain string, fully sanitized
+            agent=self.name,
+            duration_ms=analysis.duration_ms,
+            tokens_used=analysis.tokens_used,
+            error=None, requires_approval=False, approval_prompt=None,
         )
 
     async def stream_response(

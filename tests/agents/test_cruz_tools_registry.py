@@ -18,6 +18,8 @@ from agents.cruz.cruz_agent import CRUZ_TOOLS, _TOOL_AGENT_MAP
 # _TOOL_AGENT_MAP — CruzAgent.process() dispatches them directly.
 # Mac Controller tools (SP3) are service-level; dispatch in _dispatch_mac_tool.
 # Web tools (SP4) are service-level; dispatched inline against services.browser.
+# screen_perception (SP6) is service-level; dispatched in
+# _dispatch_screen_perception_tool against services.screen_perception.
 _BUILTIN_TOOLS = {
     "record_pattern_observation",
     "mac_screenshot",
@@ -27,6 +29,7 @@ _BUILTIN_TOOLS = {
     "mac_notify",
     "web_search",
     "fetch_url",
+    "screen_perception",
 }
 
 # Dispatcher-style tools: routed via _TOOL_AGENT_MAP but use structured

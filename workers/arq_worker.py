@@ -35,6 +35,7 @@ from arq.connections import RedisSettings
 
 from services.alerts import get_alert_service
 from workers.tasks.backup_tasks import run_backup
+from workers.tasks.browser_health import browser_health_probe
 from workers.tasks.pulse_tasks import run_pulse
 from workers.tasks.raw_tasks import run_raw
 from workers.tasks.reach_tasks import run_reach
@@ -224,6 +225,8 @@ class WorkerSettings:
         run_raw,
         run_reach,
         run_backup,
+        # SP4
+        browser_health_probe,
         process_github_webhook,
         process_vercel_webhook,
         process_google_calendar_webhook,
@@ -257,6 +260,8 @@ class WorkerSettings:
         cron(run_raw, hour=3, minute=0),
         cron(run_backup, hour=4, minute=0),
         cron(run_pulse, hour=6, minute=0),
+        # SP4
+        cron(browser_health_probe, hour=9, minute=0),
         # SP5 — agent crons
         cron(fire_funded_watcher_cron, hour=8, minute=0),  # daily
         cron(fire_followup_cron, hour=10, minute=0),  # daily

@@ -470,3 +470,84 @@ class TestHealthOllamaRequiredModels:
              patch("main.anthropic.AsyncAnthropic", return_value=_unhealthy_claude()):
             resp = TestClient(app).get("/health")
         assert resp.json()["status"] == "degraded"
+
+
+# ---------------------------------------------------------------------------
+# Browser service (SP4)
+# ---------------------------------------------------------------------------
+
+def _healthy_browser():
+    svc = AsyncMock()
+    svc.health = AsyncMock(return_value={"status": "alive", "contexts": []})
+    return svc
+
+
+def _not_started_browser():
+    svc = AsyncMock()
+    svc.health = AsyncMock(return_value={"status": "not_started"})
+    return svc
+
+
+def _degraded_browser():
+    svc = AsyncMock()
+    svc.health = AsyncMock(return_value={"status": "degraded", "reason": "page evaluation timeout"})
+    return svc
+
+
+class TestHealthBrowserBlock:
+    """Browser service health is exposed on /health (SP4)."""
+
+    def test_has_browser_field(self):
+        """Response must include a `browser` key."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_browser_service", return_value=_healthy_browser()):
+            resp = TestClient(app).get("/health")
+        assert "browser" in resp.json()
+
+    def test_browser_status_alive(self):
+        """Browser reports 'alive' when healthy."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_browser_service", return_value=_healthy_browser()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["browser"]["status"] == "alive"
+
+    def test_browser_status_not_started(self):
+        """Browser reports 'not_started' before init."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_browser_service", return_value=_not_started_browser()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["browser"]["status"] == "not_started"
+
+    def test_browser_status_degraded(self):
+        """Browser reports 'degraded' on partial failure."""
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_browser_service", return_value=_degraded_browser()):
+            resp = TestClient(app).get("/health")
+        assert resp.json()["browser"]["status"] == "degraded"
+
+    def test_browser_error_handling(self):
+        """Browser health check errors are caught and reported."""
+        browser_svc = AsyncMock()
+        browser_svc.health = AsyncMock(side_effect=Exception("playwright crash"))
+        with patch("main.get_db_service", return_value=_healthy_db()), \
+             patch("main.aioredis.from_url", return_value=_healthy_redis()), \
+             patch("main.OllamaService", return_value=_healthy_ollama()), \
+             patch("main.anthropic.AsyncAnthropic", return_value=_healthy_claude()), \
+             patch("main.get_browser_service", return_value=browser_svc):
+            resp = TestClient(app).get("/health")
+        body = resp.json()
+        assert "browser" in body
+        assert body["browser"]["status"] == "error"
+        assert "playwright crash" in body["browser"].get("reason", "")

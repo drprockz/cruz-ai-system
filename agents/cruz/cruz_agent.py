@@ -38,12 +38,14 @@ from agents.titan.titan_agent import TitanAgent
 from agents.mark.mark_agent import MarkAgent
 from agents.raw.raw_agent import RawAgent
 from agents.pulse.pulse_agent import PulseAgent
+from agents.calendar.calendar_agent import CalendarAgent
 from agents.relay.relay_agent import classify
 from services.alerts import get_alert_service
 from services.conversation import ConversationService
 from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
 from services.knowledge_base import get_kb_service
+from services.mac_controller import MacControllerError, get_mac_controller_service
 from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
@@ -304,6 +306,175 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["agent_name", "interaction_type", "observed_pattern"],
         },
     },
+    # ── Mac Controller (Layer 2 — services/mac_controller.py) ─────────
+    {
+        "name": "mac_screenshot",
+        "description": (
+            "Capture the screen on the Mac Mini and return PNG bytes. "
+            "Optional region [x, y, width, height] in screen pixels. "
+            "Use for 'what's on my screen' or grabbing visual context for vision tasks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "description": "Optional [x, y, width, height] sub-rectangle.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "mac_clipboard_read",
+        "description": "Read the current macOS clipboard contents as text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "mac_clipboard_write",
+        "description": (
+            "Replace the macOS clipboard with the given text. "
+            "Use for 'copy this for me' or staging text the user will paste."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to place on the clipboard."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "mac_open_app",
+        "description": (
+            "Launch (or bring to front) a macOS app by name. "
+            "Examples: 'TextEdit', 'Visual Studio Code', 'Mail'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact app name as it appears in /Applications."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mac_notify",
+        "description": (
+            "Fire a macOS Notification Center banner. "
+            "Use for reminders, soft alerts, or confirming background work."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body":  {"type": "string"},
+                "sound": {"type": "boolean", "description": "Play Submarine sound (default false)."},
+            },
+            "required": ["title", "body"],
+        },
+    },
+    # ── Calendar (Layer 2 — agents/calendar/calendar_agent.py) ────────
+    {
+        "name": "calendar_create_event",
+        "description": (
+            "Create a calendar event in Google Calendar (auto-mirrors to Calendar.app). "
+            "Self-only events (no attendees) are created immediately. "
+            "Events with attendees require user approval before sending invites."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title":       {"type": "string"},
+                "start_iso":   {"type": "string",
+                                "description": "ISO 8601 datetime, e.g. 2026-05-01T10:00:00"},
+                "end_iso":     {"type": "string"},
+                "attendees":   {"type": "array", "items": {"type": "string"},
+                                "description": "Optional list of attendee email addresses."},
+                "description": {"type": "string"},
+                "location":    {"type": "string"},
+                "calendar_id": {"type": "string",
+                                "description": "Optional non-primary calendar ID."},
+            },
+            "required": ["title", "start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "calendar_list_events",
+        "description": "List Google Calendar events in a time range. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso":   {"type": "string",
+                                "description": "ISO 8601 datetime, inclusive lower bound."},
+                "end_iso":     {"type": "string",
+                                "description": "ISO 8601 datetime, exclusive upper bound."},
+                "calendar_id": {"type": "string",
+                                "description": "Optional non-primary calendar ID."},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "calendar_find_free_slot",
+        "description": (
+            "Find the first free slot of `duration_minutes` in [earliest_iso, latest_iso]. "
+            "Reads busy events from Google Calendar. Read-only — does not create anything. "
+            "Caller controls working hours by clamping earliest_iso/latest_iso to the desired window."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "duration_minutes": {"type": "integer", "minimum": 5},
+                "earliest_iso":     {"type": "string",
+                                     "description": "ISO 8601 datetime, inclusive lower bound of search window."},
+                "latest_iso":       {"type": "string",
+                                     "description": "ISO 8601 datetime, exclusive upper bound of search window."},
+            },
+            "required": ["duration_minutes", "earliest_iso", "latest_iso"],
+        },
+    },
+    # ── Web (Layer 3 — services/browser/...) ──────────────────────────
+    {
+        "name": "web_search",
+        "description": (
+            "Search the live web. Use when the user asks about current events, "
+            "recent releases, or anything past your training cutoff. "
+            "Returns top results with title, URL, and snippet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": (
+            "Fetch the readable text of a web page by URL. Use as a follow-up to "
+            "web_search when you need the actual contents of a result, not just "
+            "its snippet. Returns plain text, trimmed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "max_chars": {"type": "integer", "default": 8000,
+                              "minimum": 500, "maximum": 30000},
+            },
+            "required": ["url"],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -320,6 +491,9 @@ _TOOL_AGENT_MAP: Dict[str, Any] = {
     "mark": MarkAgent,
     "raw": RawAgent,
     "pulse": PulseAgent,
+    "calendar_create_event":   CalendarAgent,
+    "calendar_list_events":    CalendarAgent,
+    "calendar_find_free_slot": CalendarAgent,
 }
 
 
@@ -577,6 +751,66 @@ class CruzAgent(BaseAgent):
                             )
                             continue
 
+                        # ── Built-in tool: web_search ─────────────────────
+                        if block.name == "web_search":
+                            from services.browser import (
+                                get_browser_service,
+                                BrowserCaptchaDetected,
+                                BrowserRateLimited,
+                                BrowserError,
+                            )
+                            ti = block.input or {}
+                            q = ti.get("query", "")
+                            lim = int(ti.get("limit", 5))
+                            try:
+                                results = await get_browser_service().search(
+                                    q, limit=lim, trace_id=input["trace_id"],
+                                )
+                                if not results:
+                                    tool_text = f"web_search returned no results for {q!r}."
+                                else:
+                                    tool_text = "\n".join(
+                                        f"{r['rank']}. {r['title']} — {r['url']}\n   {r['snippet']}"
+                                        for r in results
+                                    )
+                            except BrowserCaptchaDetected as exc:
+                                tool_text = f"web_search blocked: {exc.kind} on {exc.url}"
+                            except BrowserRateLimited as exc:
+                                tool_text = f"web_search rate-limited at {exc.domain}"
+                            except BrowserError as exc:
+                                tool_text = f"web_search failed: {exc}"
+                            tool_results.append({
+                                "type": "tool_result", "tool_use_id": block.id, "content": tool_text,
+                            })
+                            continue
+
+                        # ── Built-in tool: fetch_url ──────────────────────
+                        if block.name == "fetch_url":
+                            from services.browser import (
+                                get_browser_service,
+                                BrowserCaptchaDetected,
+                                BrowserRateLimited,
+                                BrowserError,
+                            )
+                            ti = block.input or {}
+                            url = ti.get("url", "")
+                            max_chars = int(ti.get("max_chars", 8000))
+                            try:
+                                text = await get_browser_service().extract_text(
+                                    url, trace_id=input["trace_id"],
+                                )
+                                tool_text = text[:max_chars]
+                            except BrowserCaptchaDetected as exc:
+                                tool_text = f"fetch_url blocked: {exc.kind} on {exc.url}"
+                            except BrowserRateLimited as exc:
+                                tool_text = f"fetch_url rate-limited at {exc.domain}"
+                            except BrowserError as exc:
+                                tool_text = f"fetch_url failed: {exc}"
+                            tool_results.append({
+                                "type": "tool_result", "tool_use_id": block.id, "content": tool_text,
+                            })
+                            continue
+
                         agent_output = await self._dispatch_tool(
                             tool_name=block.name,
                             tool_input=block.input,
@@ -682,6 +916,10 @@ class CruzAgent(BaseAgent):
 
         Returns an error AgentOutput if the tool name is unrecognised.
         """
+        # ── Mac Controller dispatch (services, not agents) ─────────────
+        if tool_name.startswith("mac_"):
+            return await self._dispatch_mac_tool(tool_name, tool_input, trace_id)
+
         agent_cls = _TOOL_AGENT_MAP.get(tool_name)
         if agent_cls is None:
             logger.warning(
@@ -699,13 +937,78 @@ class CruzAgent(BaseAgent):
             )
 
         specialist_agent = agent_cls()
+        # Inject tool name into context so dispatcher-style agents (Calendar)
+        # know which operation to run. Existing agents ignore the extra key.
+        context: Dict[str, Any] = dict(tool_input)
+        context["tool"] = tool_name
         agent_input: AgentInput = {
             "task": tool_input.get("task", ""),
-            "context": tool_input,
+            "context": context,
             "trace_id": trace_id,
             "conversation_id": conversation_id,
         }
         return await specialist_agent.process(agent_input)
+
+    async def _dispatch_mac_tool(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        trace_id: str,
+    ) -> AgentOutput:
+        """Route mac_* tools directly to MacControllerService."""
+        start = time.monotonic()
+        mac = get_mac_controller_service()
+        try:
+            if tool_name == "mac_screenshot":
+                region = tool_input.get("region")
+                region_t = tuple(region) if region else None
+                png = await mac.screenshot(region=region_t)
+                result: Any = {
+                    "bytes_len": len(png),
+                    "mime_type": "image/png",
+                    # Note: raw bytes are NOT included in result to keep
+                    # tool_result text size manageable. Caller (e.g. SP6)
+                    # invokes mac.screenshot() directly when bytes are needed.
+                }
+            elif tool_name == "mac_clipboard_read":
+                result = await mac.clipboard_read()
+            elif tool_name == "mac_clipboard_write":
+                await mac.clipboard_write(tool_input["text"])
+                result = {"written": True, "chars": len(tool_input["text"])}
+            elif tool_name == "mac_open_app":
+                await mac.open_app(tool_input["name"])
+                result = {"opened": tool_input["name"]}
+            elif tool_name == "mac_notify":
+                await mac.notify(
+                    tool_input["title"],
+                    tool_input["body"],
+                    sound=tool_input.get("sound", False),
+                )
+                result = {"notified": True}
+            else:
+                return AgentOutput(
+                    success=False, result=None, agent=self.name,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    tokens_used=0,
+                    error=f"Unknown mac tool: {tool_name!r}",
+                    requires_approval=False, approval_prompt=None,
+                )
+        except MacControllerError as exc:
+            return AgentOutput(
+                success=False, result=None, agent=self.name,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                tokens_used=0,
+                error=str(exc),
+                requires_approval=False, approval_prompt=None,
+            )
+
+        return AgentOutput(
+            success=True, result=result, agent=self.name,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            tokens_used=0,
+            error=None,
+            requires_approval=False, approval_prompt=None,
+        )
 
     async def stream_response(
         self,
@@ -848,6 +1151,54 @@ class CruzAgent(BaseAgent):
                             "tool_use_id": tu.tool_use_id,
                             "content": str({"recorded": True}),
                         })
+                        continue
+
+                    # ── Built-in tools: web_search / fetch_url ────────
+                    if tu.name in ("web_search", "fetch_url"):
+                        from services.browser import (
+                            get_browser_service,
+                            BrowserCaptchaDetected,
+                            BrowserRateLimited,
+                            BrowserError,
+                        )
+                        yield ToolStart(
+                            agent=tu.name,
+                            summary=f"Running {tu.name}.",
+                        )
+                        ti = tu.input or {}
+                        try:
+                            if tu.name == "web_search":
+                                results = await get_browser_service().search(
+                                    ti.get("query", ""),
+                                    limit=int(ti.get("limit", 5)),
+                                    trace_id=trace_id,
+                                )
+                                content = (
+                                    "\n".join(
+                                        f"{r['rank']}. {r['title']} — {r['url']}\n   {r['snippet']}"
+                                        for r in results
+                                    ) if results else "no results"
+                                )
+                            else:  # fetch_url
+                                text = await get_browser_service().extract_text(
+                                    ti.get("url", ""), trace_id=trace_id,
+                                )
+                                content = text[: int(ti.get("max_chars", 8000))]
+                        except BrowserCaptchaDetected as exc:
+                            content = f"{tu.name} blocked: {exc.kind} on {exc.url}"
+                        except BrowserRateLimited as exc:
+                            content = f"{tu.name} rate-limited at {exc.domain}"
+                        except BrowserError as exc:
+                            content = f"{tu.name} failed: {exc}"
+                        tool_result_blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.tool_use_id,
+                            "content": content,
+                        })
+                        yield ToolFinish(
+                            agent=tu.name,
+                            result_preview=content[:200],
+                        )
                         continue
 
                     yield ToolStart(

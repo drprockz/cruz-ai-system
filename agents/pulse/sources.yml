@@ -1,0 +1,13 @@
+# PULSE source registry
+# pages: non-RSS news sources for the morning Web roundup section.
+# Populate this list on the deployment machine; left empty here so the
+# existing test suite stays green.
+
+pages: []
+
+# Example entries (uncomment to enable):
+# pages:
+#   - url: https://techcrunch.com/
+#     selector: main
+#   - url: https://inc42.com/
+#     selector: main

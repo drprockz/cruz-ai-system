@@ -475,6 +475,29 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["url"],
         },
     },
+    {
+        "name": "screen_perception",
+        "description": (
+            "Look at what's currently on the user's Mac Mini screen and answer "
+            "a question about it. Use when the user asks 'what am I working on?', "
+            "'what's on my screen?', 'help me with this error' (referring to "
+            "something visible), or any question that requires seeing the screen. "
+            "Captures a fresh screenshot every call. Returns a sanitized text answer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional specific question to ask about the screen. "
+                        "Omit to get the canonical 'what is the user working on?' summary."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 # Map tool name → agent class

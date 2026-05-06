@@ -351,3 +351,56 @@ async def test_process_runtime_context_omits_when_disabled_via_env(monkeypatch) 
     # Disabled flag → service must not be called and prompt has no line
     get_aw.assert_not_called()
     assert "Active app:" not in captured_system["value"]
+
+
+@pytest.mark.asyncio
+async def test_stream_response_runtime_context_includes_active_app() -> None:
+    """stream_response also injects active-app into runtime_context."""
+    from types import SimpleNamespace
+    from services.llm.stream_events import (
+        TextDeltaEvent, DoneEvent as _LLMDone, UsageInfo,
+    )
+
+    cruz = CruzAgent()
+    aw = ActiveWindow(app="Terminal", window_title=None, captured_at=0.0)
+
+    captured_system: dict = {}
+
+    async def fake_llm_chat_stream(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        yield TextDeltaEvent(delta="ok")
+        yield _LLMDone(stop_reason="end_turn",
+                       usage=UsageInfo(input_tokens=1, output_tokens=1))
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat_stream",
+        new=fake_llm_chat_stream,
+    ):
+        mock_get_sp.return_value.get_active_window = AsyncMock(return_value=aw)
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        # Drain the iterator
+        async for _ in cruz.stream_response(
+            task="hi", conversation_id="c1", trace_id="t1", device=None,
+        ):
+            pass
+
+    assert "- Active app: Terminal" in captured_system["value"]

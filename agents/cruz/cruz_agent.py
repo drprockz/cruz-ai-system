@@ -14,6 +14,7 @@ API-layer routing. Claude's native tool_use is the real orchestration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -643,6 +644,27 @@ class CruzAgent(BaseAgent):
                 f"- When asked the time or date, answer directly from the datetime above. "
                 f"Never say you 'can't access real-time data' — this runtime context IS real-time."
             )
+
+            # SP6 — active-app context injection. Fail-soft, never blocks request.
+            # Disabled via CRUZ_DISABLE_ACTIVE_APP=1 for exit-gate Gate 2 control runs.
+            if os.environ.get("CRUZ_DISABLE_ACTIVE_APP") != "1":
+                try:
+                    sp = get_screen_perception_service()
+                    active = await asyncio.wait_for(
+                        sp.get_active_window(), timeout=2.0
+                    )
+                    runtime_context += f"\n{active.to_context_line()}"
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] active-window injection timed out (2s)",
+                        input["trace_id"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] active-window injection skipped: %s",
+                        input["trace_id"], exc,
+                    )
+
             system_prompt = _SYSTEM_PROMPT + runtime_context
             if kb_context:
                 system_prompt = kb_context + "\n\n" + system_prompt

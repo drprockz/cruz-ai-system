@@ -112,3 +112,242 @@ async def test_dispatch_tool_routes_screen_perception_correctly() -> None:
             conversation_id="c",
         )
     mock_method.assert_awaited_once_with({"question": "q"}, "t")
+
+
+@pytest.mark.asyncio
+async def test_process_runtime_context_includes_active_app() -> None:
+    """process() injects an 'Active app:' line into the system prompt
+    passed to llm.chat."""
+    cruz = CruzAgent()
+    aw = ActiveWindow(app="Code", window_title="x.py", captured_at=0.0)
+
+    captured_system: dict = {}
+
+    from types import SimpleNamespace
+
+    async def fake_llm_chat(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    # Patch all the heavy collaborators so we exercise just the
+    # runtime_context construction.
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ) as mock_db, patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat",
+        new=AsyncMock(side_effect=fake_llm_chat),
+    ):
+        mock_get_sp.return_value.get_active_window = AsyncMock(return_value=aw)
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        await cruz.process({
+            "task": "hi",
+            "context": {},
+            "trace_id": "t1",
+            "conversation_id": "c1",
+        })
+
+    sys_prompt = captured_system["value"]
+    assert "- Active app: Code — x.py" in sys_prompt
+
+
+@pytest.mark.asyncio
+async def test_process_runtime_context_omits_active_app_on_failure() -> None:
+    """If get_active_window raises, the request still completes and the
+    'Active app:' line is omitted from system prompt."""
+    cruz = CruzAgent()
+
+    captured_system: dict = {}
+
+    from types import SimpleNamespace
+
+    async def fake_llm_chat(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat",
+        new=AsyncMock(side_effect=fake_llm_chat),
+    ):
+        mock_get_sp.return_value.get_active_window = AsyncMock(
+            side_effect=RuntimeError("osascript missing")
+        )
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        out = await cruz.process({
+            "task": "hi",
+            "context": {},
+            "trace_id": "t1",
+            "conversation_id": "c1",
+        })
+
+    assert out["success"] is True
+    assert "Active app:" not in captured_system["value"]
+
+
+@pytest.mark.asyncio
+async def test_process_runtime_context_omits_on_timeout() -> None:
+    """If get_active_window hangs > 2s, wait_for cancels and the
+    'Active app:' line is omitted. This is the load-bearing latency
+    test for spec §5 (voice-mode ~3.6s SLO must not regress)."""
+    cruz = CruzAgent()
+
+    captured_system: dict = {}
+
+    from types import SimpleNamespace
+
+    async def fake_llm_chat(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    async def hang_forever() -> ActiveWindow:
+        await asyncio.sleep(60)   # cancelled by wait_for(timeout=2.0)
+        return ActiveWindow(app="never", window_title=None, captured_at=0.0)
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat",
+        new=AsyncMock(side_effect=fake_llm_chat),
+    ), patch(
+        # Speed up the test — patch the wait_for budget so we don't
+        # actually wait 2 real seconds. Verifies the cancellation path
+        # without slowing the suite.
+        "agents.cruz.cruz_agent.asyncio.wait_for",
+        new=AsyncMock(side_effect=asyncio.TimeoutError()),
+    ):
+        mock_get_sp.return_value.get_active_window = hang_forever
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        out = await cruz.process({
+            "task": "hi",
+            "context": {},
+            "trace_id": "t1",
+            "conversation_id": "c1",
+        })
+
+    # Request still completes
+    assert out["success"] is True
+    # No active-app line in the system prompt
+    assert "Active app:" not in captured_system["value"]
+
+
+@pytest.mark.asyncio
+async def test_process_runtime_context_omits_when_disabled_via_env(monkeypatch) -> None:
+    """CRUZ_DISABLE_ACTIVE_APP=1 short-circuits the injection (used for
+    Gate 2 control runs in the exit-gate test plan)."""
+    monkeypatch.setenv("CRUZ_DISABLE_ACTIVE_APP", "1")
+
+    cruz = CruzAgent()
+    captured_system: dict = {}
+
+    from types import SimpleNamespace
+
+    async def fake_llm_chat(*, system, messages, tools, max_tokens, **_):
+        captured_system["value"] = system
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    aw = ActiveWindow(app="Code", window_title="x.py", captured_at=0.0)
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat",
+        new=AsyncMock(side_effect=fake_llm_chat),
+    ):
+        get_aw = AsyncMock(return_value=aw)
+        mock_get_sp.return_value.get_active_window = get_aw
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        await cruz.process({
+            "task": "hi",
+            "context": {},
+            "trace_id": "t1",
+            "conversation_id": "c1",
+        })
+
+    # Disabled flag → service must not be called and prompt has no line
+    get_aw.assert_not_called()
+    assert "Active app:" not in captured_system["value"]

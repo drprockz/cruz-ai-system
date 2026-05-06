@@ -46,11 +46,11 @@ from services.db import get_db_service
 from services.device_handoff import DeviceHandoffService
 from services.knowledge_base import get_kb_service
 from services.mac_controller import MacControllerError, get_mac_controller_service
+from services.redis_client import get_redis_service
 from services.screen_perception import (
     ScreenPerceptionError,
     get_screen_perception_service,
 )
-from services.redis_client import get_redis_service
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
 from services.embedding import get_embedding_service

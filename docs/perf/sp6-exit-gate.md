@@ -43,7 +43,7 @@ See `sp6-forge-improvement-test.md` for the full A/B procedure. Outcome:
 
 ```
 source venv/bin/activate
-pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_streaming.py -v
+pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_stream.py -v
 ```
 
 - [ ] All pre-existing CRUZ tests pass.

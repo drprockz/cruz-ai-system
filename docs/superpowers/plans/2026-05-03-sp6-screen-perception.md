@@ -2406,7 +2406,7 @@ See `sp6-forge-improvement-test.md` for the full A/B procedure. Outcome:
 
 ```
 source venv/bin/activate
-pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_streaming.py -v
+pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_stream.py -v
 ```
 
 - [ ] All pre-existing CRUZ tests pass.
@@ -2517,7 +2517,7 @@ pytest tests/services/test_screen_perception.py \
        tests/agents/test_cruz_screen_perception.py \
        tests/agents/test_cruz_agent.py \
        tests/agents/test_cruz_conversation.py \
-       tests/agents/test_cruz_streaming.py -v
+       tests/agents/test_cruz_stream.py -v
 ```
 
 Expected: every test passes.
@@ -2552,7 +2552,7 @@ Open the relevant app, run the curl command, paste the answer (truncated) into t
 - [ ] **Step 4: Run Gate 3's regression suite once more on the Mac Mini**
 
 ```bash
-pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_streaming.py -v
+pytest tests/agents/test_cruz_agent.py tests/agents/test_cruz_conversation.py tests/agents/test_cruz_stream.py -v
 ```
 
 - [ ] **Step 5: Run Gate 4's load harness and record P95 in `docs/perf/load_results.md`**

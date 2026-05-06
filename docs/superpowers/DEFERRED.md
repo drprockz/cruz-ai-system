@@ -122,6 +122,30 @@ After SP7 ships, when Full Disk Access is already granted for one-time monitorin
 
 ---
 
+## SP6 — Screen Perception (follow-ups, post-merge)
+
+Five items surfaced during SP6 implementation reviews. None block merge; tracked here for future cleanup PRs.
+
+### Code-quality follow-ups
+
+- [ ] **Extract `runtime_context` builder into a helper.** `agents/cruz/cruz_agent.py` `process()` and `stream_response()` now share ~50 lines of duplicated runtime_context assembly (datetime + active-app injection + KB context concat). Factor into `_build_system_prompt(trace_id, kb_context) -> str` on `CruzAgent`. Pre-existing duplication that SP6 made slightly worse — rule of three reached. **Estimate:** 1–2 hr.
+
+- [ ] **Extract stream-path `screen_perception` branch.** `agents/cruz/cruz_agent.py:1310-1341` inlines tool_result_block construction and ToolFinish emission. The non-stream path uses `_dispatch_screen_perception_tool` cleanly. If SP7+ adds another service-direct tool (likely), the inline pattern will copy. **Estimate:** 30 min.
+
+### Reliability follow-ups
+
+- [ ] **Subprocess orphan-window in `mac.run_osascript` on outer cancel.** `services/mac_controller.py:198-225` only kills the subprocess on its own `asyncio.TimeoutError`. If the SP6 outer `wait_for(timeout=2.0)` in CRUZ cancels the call, the inner `proc.communicate()` is cancelled too — but the subprocess may briefly outlive cancellation before parent reaps. Add a `try/finally` to `proc.kill(); await proc.wait()` on `CancelledError`. Low impact (osascript exits in <50ms typically). **Estimate:** 1 hr including a regression test.
+
+### Configurability follow-ups
+
+- [ ] **`WINDOW_TITLE_ALLOWLIST` as config.** Currently a frozenset literal in `services/screen_perception.py`. Move to env-driven or `services/config.py` once a second use case appears (e.g., adding "Notion" / "Obsidian"). **Estimate:** 1–2 hr.
+
+### Telemetry follow-ups
+
+- [ ] **Vision token-budget telemetry.** `analysis.tokens_used` flows back through `AgentOutput.tokens_used` into `agent_logs`, but there's no separate aggregation tracking screen_perception cost. After Gate 4 baseline run, add a simple Grafana panel or query breaking out `screen_perception` cost. **Estimate:** 30 min query + a panel.
+
+---
+
 ## Tracking
 
 When you run the end-of-SP7 verification batch:

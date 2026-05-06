@@ -14,6 +14,7 @@ API-layer routing. Claude's native tool_use is the real orchestration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -47,6 +48,10 @@ from services.device_handoff import DeviceHandoffService
 from services.knowledge_base import get_kb_service
 from services.mac_controller import MacControllerError, get_mac_controller_service
 from services.redis_client import get_redis_service
+from services.screen_perception import (
+    ScreenPerceptionError,
+    get_screen_perception_service,
+)
 from services.semantic_memory import SemanticMemoryService
 from services.qdrant import get_qdrant_service
 from services.embedding import get_embedding_service
@@ -475,6 +480,29 @@ CRUZ_TOOLS: List[Dict[str, Any]] = [
             "required": ["url"],
         },
     },
+    {
+        "name": "screen_perception",
+        "description": (
+            "Look at what's currently on the user's Mac Mini screen and answer "
+            "a question about it. Use when the user asks 'what am I working on?', "
+            "'what's on my screen?', 'help me with this error' (referring to "
+            "something visible), or any question that requires seeing the screen. "
+            "Captures a fresh screenshot every call. Returns a sanitized text answer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional specific question to ask about the screen. "
+                        "Omit to get the canonical 'what is the user working on?' summary."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 # Map tool name → agent class
@@ -616,6 +644,27 @@ class CruzAgent(BaseAgent):
                 f"- When asked the time or date, answer directly from the datetime above. "
                 f"Never say you 'can't access real-time data' — this runtime context IS real-time."
             )
+
+            # SP6 — active-app context injection. Fail-soft, never blocks request.
+            # Disabled via CRUZ_DISABLE_ACTIVE_APP=1 for exit-gate Gate 2 control runs.
+            if os.environ.get("CRUZ_DISABLE_ACTIVE_APP") != "1":
+                try:
+                    sp = get_screen_perception_service()
+                    active = await asyncio.wait_for(
+                        sp.get_active_window(), timeout=2.0
+                    )
+                    runtime_context += f"\n{active.to_context_line()}"
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] active-window injection timed out (2s)",
+                        input["trace_id"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] active-window injection skipped: %s",
+                        input["trace_id"], exc,
+                    )
+
             system_prompt = _SYSTEM_PROMPT + runtime_context
             if kb_context:
                 system_prompt = kb_context + "\n\n" + system_prompt
@@ -916,6 +965,10 @@ class CruzAgent(BaseAgent):
 
         Returns an error AgentOutput if the tool name is unrecognised.
         """
+        # Screen perception (services/screen_perception.py)
+        if tool_name == "screen_perception":
+            return await self._dispatch_screen_perception_tool(tool_input, trace_id)
+
         # ── Mac Controller dispatch (services, not agents) ─────────────
         if tool_name.startswith("mac_"):
             return await self._dispatch_mac_tool(tool_name, tool_input, trace_id)
@@ -1010,6 +1063,39 @@ class CruzAgent(BaseAgent):
             requires_approval=False, approval_prompt=None,
         )
 
+    async def _dispatch_screen_perception_tool(
+        self,
+        tool_input: Dict[str, Any],
+        trace_id: str,
+    ) -> AgentOutput:
+        """Route the screen_perception tool to ScreenPerceptionService.analyze.
+
+        Returns AgentOutput with `result` as the sanitized answer string
+        (NOT a dict) so that record_agent_activity's str(result)[:200]
+        path persists only sanitized text — see spec §6 'Why a plain
+        string, not a dict'.
+        """
+        start = time.monotonic()
+        sp = get_screen_perception_service()
+        try:
+            analysis = await sp.analyze(question=tool_input.get("question"))
+        except ScreenPerceptionError as exc:
+            return AgentOutput(
+                success=False, result=None, agent=self.name,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                tokens_used=0, error=str(exc),
+                requires_approval=False, approval_prompt=None,
+            )
+
+        return AgentOutput(
+            success=True,
+            result=analysis.answer,                # plain string, fully sanitized
+            agent=self.name,
+            duration_ms=analysis.duration_ms,
+            tokens_used=analysis.tokens_used,
+            error=None, requires_approval=False, approval_prompt=None,
+        )
+
     async def stream_response(
         self,
         *,
@@ -1075,6 +1161,26 @@ class CruzAgent(BaseAgent):
                 f"- When asked the time or date, answer directly from the datetime above. "
                 f"Never say you 'can't access real-time data' — this runtime context IS real-time."
             )
+
+            # SP6 — active-app context injection. Fail-soft, never blocks request.
+            if os.environ.get("CRUZ_DISABLE_ACTIVE_APP") != "1":
+                try:
+                    sp = get_screen_perception_service()
+                    active = await asyncio.wait_for(
+                        sp.get_active_window(), timeout=2.0
+                    )
+                    runtime_context += f"\n{active.to_context_line()}"
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] active-window injection timed out (2s)",
+                        trace_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] active-window injection skipped: %s",
+                        trace_id, exc,
+                    )
+
             system_prompt = _SYSTEM_PROMPT + runtime_context
             if kb_context:
                 system_prompt = kb_context + "\n\n" + system_prompt
@@ -1199,6 +1305,39 @@ class CruzAgent(BaseAgent):
                             agent=tu.name,
                             result_preview=content[:200],
                         )
+                        continue
+
+                    # ── Built-in tool: screen_perception ──────────────
+                    if tu.name == "screen_perception":
+                        yield ToolStart(
+                            agent=tu.name,
+                            summary="Looking at your screen.",
+                        )
+                        out = await self._dispatch_screen_perception_tool(
+                            tu.input or {}, trace_id,
+                        )
+                        if out.get("success"):
+                            answer = out.get("result", "") or ""
+                            tool_result_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_use_id,
+                                "content": answer,
+                            })
+                            yield ToolFinish(
+                                agent=tu.name,
+                                result_preview=answer[:200],
+                            )
+                        else:
+                            err = out.get("error") or "unknown error"
+                            tool_result_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_use_id,
+                                "content": f"screen_perception failed: {err}",
+                            })
+                            yield ToolFinish(
+                                agent=tu.name,
+                                result_preview=f"failed: {err}",
+                            )
                         continue
 
                     yield ToolStart(

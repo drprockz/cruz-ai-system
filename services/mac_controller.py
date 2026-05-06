@@ -32,7 +32,9 @@ _SUBPROCESS_TIMEOUT = 10.0
 
 # Allowed characters for app names — defends against AppleScript injection
 # via the open_app primitive. Letters, digits, spaces, dots, hyphens, underscores.
-_APP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
+APP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
+# Backward-compat alias.
+_APP_NAME_RE = APP_NAME_RE
 
 
 class MacControllerError(RuntimeError):
@@ -63,7 +65,7 @@ def _iso_to_applescript_date(iso: str) -> str:
     return f'date "{formatted}"'
 
 
-def _escape_applescript_string(raw: str) -> str:
+def escape_applescript_string(raw: str) -> str:
     """Escape a Python string for safe inclusion inside an AppleScript double-quoted string.
 
     AppleScript string literals don't support \\n / \\t escapes — newlines and
@@ -74,6 +76,10 @@ def _escape_applescript_string(raw: str) -> str:
     out = raw.replace("\\", "\\\\").replace('"', '\\"')
     out = out.replace("\n", '" & return & "').replace("\t", '" & tab & "')
     return out
+
+
+# Backward-compat alias — internal callers may keep using the leading-underscore form.
+_escape_applescript_string = escape_applescript_string
 
 
 class MacControllerService:
@@ -126,23 +132,23 @@ class MacControllerService:
 
     async def clipboard_write(self, text: str) -> None:
         """Replace the clipboard with the given text."""
-        text_esc = _escape_applescript_string(text)
+        text_esc = escape_applescript_string(text)
         await self._run_osascript(f'set the clipboard to "{text_esc}"')
 
     async def open_app(self, name: str) -> None:
         """Activate (launch + foreground) a macOS app by name.
 
-        App name is validated against _APP_NAME_RE to defend against
+        App name is validated against APP_NAME_RE to defend against
         AppleScript injection through this primitive.
         """
-        if not _APP_NAME_RE.match(name):
+        if not APP_NAME_RE.match(name):
             raise MacControllerError(f"invalid app name: {name!r}")
         await self._run_osascript(f'tell application "{name}" to activate')
 
     async def notify(self, title: str, body: str, sound: bool = False) -> None:
         """Fire a macOS Notification Center banner."""
-        title_esc = _escape_applescript_string(title)
-        body_esc = _escape_applescript_string(body)
+        title_esc = escape_applescript_string(title)
+        body_esc = escape_applescript_string(body)
         script = f'display notification "{body_esc}" with title "{title_esc}"'
         if sound:
             script += ' sound name "Submarine"'
@@ -172,8 +178,8 @@ class MacControllerService:
         Calendar.app requires AppleScript date literals — we build them with
         `date "<MM/DD/YYYY HH:MM:SS>"` form which AppleScript parses unambiguously.
         """
-        title_esc = _escape_applescript_string(title)
-        cal_esc = _escape_applescript_string(calendar_name)
+        title_esc = escape_applescript_string(title)
+        cal_esc = escape_applescript_string(calendar_name)
         start_as = _iso_to_applescript_date(start_iso)
         end_as = _iso_to_applescript_date(end_iso)
 
@@ -189,22 +195,27 @@ class MacControllerService:
 
     # ── Internal subprocess runner ────────────────────────────────────
 
-    async def _run_osascript(self, script: str) -> str:
-        """Run a single AppleScript snippet, return stdout (str). Raise on error."""
+    async def run_osascript(self, script: str, timeout: Optional[float] = None) -> str:
+        """Run a single AppleScript snippet, return stdout (str). Raise on error.
+
+        timeout: optional override for the wait_for budget. Defaults to
+        _SUBPROCESS_TIMEOUT (10s) for backward compatibility.
+        """
         proc = await asyncio.create_subprocess_exec(
             "osascript", "-e", script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        effective_timeout = timeout if timeout is not None else _SUBPROCESS_TIMEOUT
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=_SUBPROCESS_TIMEOUT
+                proc.communicate(), timeout=effective_timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise MacControllerError(
-                f"osascript timed out after {_SUBPROCESS_TIMEOUT}s"
+                f"osascript timed out after {effective_timeout}s"
             )
 
         if proc.returncode != 0:
@@ -212,3 +223,6 @@ class MacControllerService:
             raise MacControllerError(err or "osascript returned non-zero")
 
         return stdout_b.decode("utf-8", errors="replace")
+
+    # Backward-compat alias.
+    _run_osascript = run_osascript

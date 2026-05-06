@@ -246,10 +246,6 @@ async def test_process_runtime_context_omits_on_timeout() -> None:
             usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         )
 
-    async def hang_forever() -> ActiveWindow:
-        await asyncio.sleep(60)   # cancelled by wait_for(timeout=2.0)
-        return ActiveWindow(app="never", window_title=None, captured_at=0.0)
-
     with patch(
         "agents.cruz.cruz_agent.get_screen_perception_service",
     ) as mock_get_sp, patch(
@@ -264,13 +260,17 @@ async def test_process_runtime_context_omits_on_timeout() -> None:
         "agents.cruz.cruz_agent.llm_chat",
         new=AsyncMock(side_effect=fake_llm_chat),
     ), patch(
-        # Speed up the test — patch the wait_for budget so we don't
-        # actually wait 2 real seconds. Verifies the cancellation path
-        # without slowing the suite.
+        # Patch wait_for to raise TimeoutError immediately. This is the
+        # load-bearing assertion: when wait_for cancels the inner call,
+        # the active-app line must be omitted and the request must still
+        # complete. Patching avoids waiting 2 real seconds in the suite.
         "agents.cruz.cruz_agent.asyncio.wait_for",
         new=AsyncMock(side_effect=asyncio.TimeoutError()),
     ):
-        mock_get_sp.return_value.get_active_window = hang_forever
+        # get_active_window is never actually awaited (wait_for raises
+        # before reaching it), but it must be a callable that returns
+        # an awaitable so the production code's call site type-checks.
+        mock_get_sp.return_value.get_active_window = AsyncMock()
         mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
         mock_kb.return_value.record_agent_activity = AsyncMock()
         mock_conv = mock_conv_cls.return_value

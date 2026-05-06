@@ -20,12 +20,13 @@ Usage:
 from __future__ import annotations
 
 import os
+import platform
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("CRUZ_LIVE_MAC_TESTS") != "1",
-    reason="live mac tests disabled (set CRUZ_LIVE_MAC_TESTS=1 to enable)",
+    os.environ.get("CRUZ_LIVE_MAC_TESTS") != "1" or platform.system() != "Darwin",
+    reason="live mac tests require CRUZ_LIVE_MAC_TESTS=1 on macOS",
 )
 
 

@@ -404,3 +404,78 @@ async def test_stream_response_runtime_context_includes_active_app() -> None:
             pass
 
     assert "- Active app: Terminal" in captured_system["value"]
+
+
+@pytest.mark.asyncio
+async def test_stream_response_emits_tool_events_for_screen_perception() -> None:
+    """When Claude calls screen_perception in streaming mode, the
+    iterator emits ToolStart and ToolFinish events."""
+    from types import SimpleNamespace
+    from services.llm.stream_events import (
+        TextDeltaEvent, ToolUseEvent, DoneEvent as _LLMDone, UsageInfo,
+    )
+    from agents.cruz.stream_events import ToolStart, ToolFinish
+
+    cruz = CruzAgent()
+    aw = ActiveWindow(app="Code", window_title=None, captured_at=0.0)
+    sa = ScreenAnalysis(
+        answer="Editing code.", active_window=aw,
+        image_bytes_len=1, duration_ms=1, tokens_used=1,
+    )
+
+    # Two-pass stream: first call emits a tool_use; second call emits
+    # plain text after the tool result is fed back.
+    call_count = {"n": 0}
+
+    async def fake_llm_chat_stream(*, system, messages, tools, max_tokens, **_):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            yield ToolUseEvent(
+                tool_use_id="tu_1", name="screen_perception", input={},
+            )
+            yield _LLMDone(stop_reason="tool_use",
+                           usage=UsageInfo(input_tokens=1, output_tokens=1))
+        else:
+            yield TextDeltaEvent(delta="Done.")
+            yield _LLMDone(stop_reason="end_turn",
+                           usage=UsageInfo(input_tokens=1, output_tokens=1))
+
+    with patch(
+        "agents.cruz.cruz_agent.get_screen_perception_service",
+    ) as mock_get_sp, patch(
+        "agents.cruz.cruz_agent.get_kb_service",
+    ) as mock_kb, patch(
+        "agents.cruz.cruz_agent.get_db_service",
+    ), patch(
+        "agents.cruz.cruz_agent.ConversationService",
+    ) as mock_conv_cls, patch(
+        "agents.cruz.cruz_agent.SemanticMemoryService",
+    ) as mock_sem_cls, patch(
+        "agents.cruz.cruz_agent.llm_chat_stream",
+        new=fake_llm_chat_stream,
+    ):
+        mock_get_sp.return_value.get_active_window = AsyncMock(return_value=aw)
+        mock_get_sp.return_value.analyze = AsyncMock(return_value=sa)
+        mock_kb.return_value.build_agent_context = AsyncMock(return_value="")
+        mock_kb.return_value.record_agent_activity = AsyncMock()
+        mock_conv = mock_conv_cls.return_value
+        mock_conv.get_or_create_conversation = AsyncMock()
+        mock_conv.load_history = AsyncMock(return_value=[])
+        mock_conv.save_exchange = AsyncMock()
+        mock_sem = mock_sem_cls.return_value
+        mock_sem.search_similar = AsyncMock(return_value=[])
+        mock_sem.store = AsyncMock()
+
+        events = []
+        async for ev in cruz.stream_response(
+            task="what am i working on?",
+            conversation_id="c1", trace_id="t1", device=None,
+        ):
+            events.append(ev)
+
+    starts = [e for e in events if isinstance(e, ToolStart)]
+    finishes = [e for e in events if isinstance(e, ToolFinish)]
+    assert any(s.agent == "screen_perception" for s in starts)
+    assert any(f.agent == "screen_perception" for f in finishes)
+    sp_finish = next(f for f in finishes if f.agent == "screen_perception")
+    assert "Editing code." in sp_finish.result_preview

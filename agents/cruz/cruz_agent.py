@@ -1307,6 +1307,39 @@ class CruzAgent(BaseAgent):
                         )
                         continue
 
+                    # ── Built-in tool: screen_perception ──────────────
+                    if tu.name == "screen_perception":
+                        yield ToolStart(
+                            agent=tu.name,
+                            summary="Looking at your screen.",
+                        )
+                        out = await self._dispatch_screen_perception_tool(
+                            tu.input or {}, trace_id,
+                        )
+                        if out.get("success"):
+                            answer = out.get("result", "") or ""
+                            tool_result_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_use_id,
+                                "content": answer,
+                            })
+                            yield ToolFinish(
+                                agent=tu.name,
+                                result_preview=answer[:200],
+                            )
+                        else:
+                            err = out.get("error") or "unknown error"
+                            tool_result_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tu.tool_use_id,
+                                "content": f"screen_perception failed: {err}",
+                            })
+                            yield ToolFinish(
+                                agent=tu.name,
+                                result_preview=f"failed: {err}",
+                            )
+                        continue
+
                     yield ToolStart(
                         agent=tu.name,
                         summary=_TOOL_INTRO.get(tu.name, f"Running {tu.name}."),

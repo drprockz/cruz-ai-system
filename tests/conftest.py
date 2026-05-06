@@ -6,10 +6,17 @@ import os
 import pytest
 
 # Set test environment before any app imports
-os.environ.setdefault("DATABASE_URL", "postgresql://cruz:password@localhost:5432/cruz_db")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
-os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test-key")
-os.environ.setdefault("ENVIRONMENT", "test")
+# Must explicitly set (not use get/default) to override empty strings from shell/dotenv
+_test_env_defaults = {
+    "DATABASE_URL": "postgresql://cruz:password@localhost:5432/cruz_db",
+    "REDIS_URL": "redis://localhost:6379",
+    "QDRANT_URL": "http://localhost:6333",
+    "ANTHROPIC_API_KEY": "sk-ant-test-key",
+    "ENVIRONMENT": "test",
+}
+for var, default in _test_env_defaults.items():
+    if not os.environ.get(var, "").strip():
+        os.environ[var] = default
 
 
 @pytest.fixture

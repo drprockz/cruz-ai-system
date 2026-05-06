@@ -47,9 +47,12 @@ class TestWorkerSettingsStructure:
         assert hasattr(WorkerSettings, "cron_jobs")
         assert isinstance(WorkerSettings.cron_jobs, list)
 
-    def test_worker_settings_has_five_cron_jobs(self):
+    def test_worker_settings_has_v1_cron_jobs(self):
+        """v1 reserves four cron jobs (REACH/RAW/BACKUP/PULSE).
+        SP4 added browser_health_probe; SP5 added more — assert lower bound,
+        not a brittle exact count."""
         from workers.arq_worker import WorkerSettings
-        assert len(WorkerSettings.cron_jobs) == 5
+        assert len(WorkerSettings.cron_jobs) >= 5
 
     def test_worker_settings_has_redis_settings(self):
         from workers.arq_worker import WorkerSettings

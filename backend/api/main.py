@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Literal, Optional
@@ -780,6 +781,77 @@ async def webhook_google_calendar(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"queued": True})
 
 
+# ─── Gmail Pub/Sub push receiver (SP5) ──────────────────────────────────────
+
+# google-auth comes in transitively via google-api-python-client (already
+# in v1 for Calendar). If it's not installed in this env, requirements
+# need google-auth>=2.0.
+try:
+    from google.oauth2 import id_token as _g_id_token
+    from google.auth.transport import requests as _g_requests
+    _GOOGLE_AUTH_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _GOOGLE_AUTH_AVAILABLE = False
+
+
+def _verify_pubsub_jwt(token: str) -> Optional[dict]:
+    """Verify a Pub/Sub OIDC token. Returns the decoded claims dict on
+    success, None on failure. See Google docs:
+      https://cloud.google.com/pubsub/docs/push#authentication
+
+    Returns None on every failure mode to avoid leaking why to the caller
+    (the endpoint just responds 401). For operators, each branch logs a
+    distinct warning so misconfiguration (e.g. missing audience env, missing
+    google-auth dep) is distinguishable from an actual attack in logs.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    if not _GOOGLE_AUTH_AVAILABLE:
+        _log.warning("gmail pubsub: google-auth not installed; verification disabled")
+        return None
+    audience = os.environ.get("GMAIL_PUBSUB_AUDIENCE", "")
+    expected_email = os.environ.get("GMAIL_PUBSUB_SERVICE_ACCOUNT", "")
+    if not audience:
+        _log.warning("gmail pubsub: GMAIL_PUBSUB_AUDIENCE not set; cannot verify")
+        return None
+    try:
+        claims = _g_id_token.verify_oauth2_token(
+            token, _g_requests.Request(), audience=audience,
+        )
+        if expected_email and claims.get("email") != expected_email:
+            _log.warning("gmail pubsub: email claim mismatch")
+            return None
+        return claims
+    except Exception as exc:
+        _log.warning("gmail pubsub: jwt verify failed: %s", exc)
+        return None
+
+
+@app.post("/webhooks/gmail")
+async def webhook_gmail(request: Request) -> JSONResponse:
+    """Pub/Sub push receiver for Gmail watch notifications.
+
+    Spec: docs/superpowers/specs/2026-04-26-sp5-event-loop-design.md §3.5
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = auth.split(None, 1)[1].strip()
+    claims = _verify_pubsub_jwt(token)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="invalid pubsub jwt")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json")
+
+    pubsub_message = (body or {}).get("message", {})
+    pool = await get_arq_pool()
+    await pool.enqueue_job("process_gmail_webhook", pubsub_message)
+    return JSONResponse(status_code=200, content={"queued": True})
+
+
 # ---------------------------------------------------------------------------
 # POST /voice/token — mint a short-lived LiveKit JWT for a voice session
 # ---------------------------------------------------------------------------
@@ -1126,6 +1198,40 @@ async def deny_approval(approval_id: str) -> JSONResponse:
     """
     result = await _respond_to_approval(approval_id, "denied")
     return JSONResponse(status_code=200, content=result)
+
+
+# ─── Notification callbacks (SP5) ───────────────────────────────────────────
+
+
+class FalseAlarmRequest(BaseModel):
+    """Request body for a user-acked false-critical notification."""
+
+    agent: str
+    dedup_key: str
+
+
+@app.post("/notifications/false-alarm")
+async def notifications_false_alarm(req: FalseAlarmRequest) -> JSONResponse:
+    """Record a user-acked false-critical for the SP5 exit-gate measurement.
+
+    Called by Telegram inline button on a `critical` notification, OR by
+    any other channel that wants to surface a false-positive ack.
+    Writes agent_state(<agent>, "false_critical:<dedup_key>") and stays
+    silent — no further action. The SP5 daily briefing handler scans
+    these rows for the 7-day measurement window.
+
+    Spec: docs/superpowers/specs/2026-04-26-sp5-event-loop-design.md §7, §8.2
+    """
+    from services.agent_state import get_state_service
+
+    state = get_state_service()
+    await state.set(
+        req.agent,
+        f"false_critical:{req.dedup_key}",
+        {"ack_at": time.time(), "agent": req.agent, "dedup_key": req.dedup_key},
+        ttl_seconds=86400 * 365,
+    )
+    return JSONResponse(status_code=200, content={"recorded": True})
 
 
 # ── SPA mount (must be the LAST route registered so it doesn't shadow API routes) ──

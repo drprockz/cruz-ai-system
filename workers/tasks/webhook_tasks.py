@@ -1,21 +1,64 @@
 """
 ARQ task handlers for inbound webhook payloads.
 
-Webhook endpoints in backend/api/main.py verify signatures, then enqueue
-one of these functions so the HTTP handler can return 200 immediately.
-Each task parses the payload, logs a structured summary, and returns
-a dict. Real-world downstream actions (dispatching to SENTINEL on PR
-open, updating deploy status, refreshing calendar) can be layered on
-top without changing the webhook contract.
+Each task:
+  1. Parses + logs the payload (v1 behavior — unchanged)
+  2. Looks up the trigger in EVENT_REGISTRY
+  3. Enqueues dispatch_event_to_agent for each registered agent (SP5 addition)
+
+The signature-verification step happens in backend/api/main.py's webhook
+endpoints; tasks here trust the payload they receive.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
+
+from arq import create_pool
+from arq.connections import RedisSettings
+
+from agents.event_driven_agent import EVENT_REGISTRY
 
 logger = logging.getLogger("cruz.workers.webhooks")
 
+
+async def _get_arq_pool():
+    """Open an ARQ Redis pool. Separated so tests can monkey-patch it."""
+    return await create_pool(
+        RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
+    )
+
+
+async def _dispatch_to_registered(trigger: str, event_payload: Dict[str, Any]) -> None:
+    """For every agent registered against `trigger`, enqueue an agent dispatch.
+    For every handler module registered, enqueue a handler dispatch."""
+    from workers.tasks.dispatch import HANDLER_REGISTRY
+
+    classes = EVENT_REGISTRY.get(trigger, [])
+    handler_modules = HANDLER_REGISTRY.get(trigger, [])
+    if not classes and not handler_modules:
+        return
+    pool = await _get_arq_pool()
+    for cls in classes:
+        await pool.enqueue_job(
+            "dispatch_event_to_agent",
+            cls.__module__,
+            cls.__name__,
+            event_payload,
+        )
+    for mod_path in handler_modules:
+        await pool.enqueue_job(
+            "dispatch_event_to_handler",
+            mod_path,
+            event_payload,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# v1 webhook tasks — logging behavior preserved; dispatch added at the end.
+# ─────────────────────────────────────────────────────────────────────────
 
 async def process_github_webhook(
     ctx: Dict[str, Any], event: str, payload: Dict[str, Any]
@@ -27,12 +70,17 @@ async def process_github_webhook(
         "github webhook event=%s action=%s repo=%s pr=%s",
         event, action, repo, pr_number,
     )
-    return {
+    summary = {
         "event": event,
         "action": action,
         "pr_number": pr_number,
         "repo": repo,
     }
+    await _dispatch_to_registered(
+        "webhook.github",
+        {"trigger": "webhook.github", "data": payload, "github_event": event},
+    )
+    return summary
 
 
 async def process_vercel_webhook(
@@ -42,7 +90,12 @@ async def process_vercel_webhook(
     project = (payload.get("payload") or {}).get("project", {}).get("name")
     url = (payload.get("payload") or {}).get("url")
     logger.info("vercel webhook type=%s project=%s url=%s", kind, project, url)
-    return {"type": kind, "project": project, "url": url}
+    summary = {"type": kind, "project": project, "url": url}
+    await _dispatch_to_registered(
+        "webhook.vercel",
+        {"trigger": "webhook.vercel", "data": payload},
+    )
+    return summary
 
 
 async def process_google_calendar_webhook(
@@ -50,7 +103,16 @@ async def process_google_calendar_webhook(
 ) -> Dict[str, Any]:
     state = headers.get("X-Goog-Resource-State") or headers.get("x-goog-resource-state")
     channel_id = headers.get("X-Goog-Channel-ID") or headers.get("x-goog-channel-id")
-    logger.info(
-        "google-calendar webhook state=%s channel=%s", state, channel_id,
+    logger.info("google-calendar webhook state=%s channel=%s", state, channel_id)
+    summary = {"resource_state": state, "channel_id": channel_id}
+    # Chunk 8 will resolve the changed event via the Calendar API and
+    # populate {"event": {id, location, summary, start, ...}} into
+    # `data` before this dispatch. Until then, Travel Planner sees only
+    # headers and skips with "not travel".
+    await _dispatch_to_registered(
+        "webhook.google-calendar",
+        {"trigger": "webhook.google-calendar", "data": {"headers": headers,
+                                                         "resource_state": state,
+                                                         "channel_id": channel_id}},
     )
-    return {"resource_state": state, "channel_id": channel_id}
+    return summary

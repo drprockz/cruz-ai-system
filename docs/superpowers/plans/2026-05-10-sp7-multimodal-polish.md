@@ -541,16 +541,18 @@ Append:
 ```python
 @pytest.mark.asyncio
 async def test_unregistered_error_deletes_token(fake_db, fake_messaging):
-    """UnregisteredError → row removed from device_tokens."""
-    fake_messaging.UnregisteredError = type("UnregisteredError", (Exception,), {})
-    fake_messaging.send.side_effect = fake_messaging.UnregisteredError("gone")
+    """UnregisteredError → row removed from device_tokens.
+
+    We use the REAL firebase_admin.messaging.UnregisteredError class so the
+    except-clause in PushService catches it without any class-shadowing
+    magic. The fake_messaging fixture only patches `messaging.send`; the
+    error classes are the real upstream ones."""
+    from firebase_admin.messaging import UnregisteredError
+    fake_messaging.UnregisteredError = UnregisteredError
+    fake_messaging.send.side_effect = UnregisteredError("gone")
     with patch("services.push.credentials"), patch("services.push.initialize_app"):
         svc = PushService(sa_path="/dev/null", project_id="t", db=fake_db)
-    # Patch the imported messaging.UnregisteredError used in services.push
-    # so the except-clause matches the side_effect class.
-    monkeypatch_target = "services.push.messaging.UnregisteredError"
-    with patch(monkeypatch_target, fake_messaging.UnregisteredError):
-        results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
+    results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
 
     assert all(not r.ok and r.reason == "unregistered" for r in results)
     delete_calls = [e for e in fake_db.executed if e[0] == "execute" and "DELETE" in e[1]]
@@ -559,25 +561,23 @@ async def test_unregistered_error_deletes_token(fake_db, fake_messaging):
 
 @pytest.mark.asyncio
 async def test_invalid_argument_error_deletes_token(fake_db, fake_messaging):
-    fake_messaging.InvalidArgumentError = type("InvalidArgumentError", (Exception,), {})
-    fake_messaging.send.side_effect = fake_messaging.InvalidArgumentError("bad")
+    from firebase_admin.exceptions import InvalidArgumentError
+    fake_messaging.InvalidArgumentError = InvalidArgumentError
+    fake_messaging.send.side_effect = InvalidArgumentError("bad", code="invalid-argument")
     with patch("services.push.credentials"), patch("services.push.initialize_app"):
         svc = PushService(sa_path="/dev/null", project_id="t", db=fake_db)
-    with patch("services.push.messaging.InvalidArgumentError",
-               fake_messaging.InvalidArgumentError):
-        results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
+    results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
     assert all(r.reason == "InvalidArgumentError" for r in results)
 
 
 @pytest.mark.asyncio
 async def test_sender_id_mismatch_deletes_token(fake_db, fake_messaging):
-    fake_messaging.SenderIdMismatchError = type("SenderIdMismatchError", (Exception,), {})
-    fake_messaging.send.side_effect = fake_messaging.SenderIdMismatchError("mismatch")
+    from firebase_admin.messaging import SenderIdMismatchError
+    fake_messaging.SenderIdMismatchError = SenderIdMismatchError
+    fake_messaging.send.side_effect = SenderIdMismatchError("mismatch")
     with patch("services.push.credentials"), patch("services.push.initialize_app"):
         svc = PushService(sa_path="/dev/null", project_id="t", db=fake_db)
-    with patch("services.push.messaging.SenderIdMismatchError",
-               fake_messaging.SenderIdMismatchError):
-        results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
+    results = await svc.send_to_user(user_id=1, payload=PushPayload("a", "b"))
     assert all(r.reason == "SenderIdMismatchError" for r in results)
 
 
@@ -902,14 +902,23 @@ And after the `else` branch:
         set_push_service(None)
 ```
 
-- [ ] **Step 4: Add a startup test**
+- [ ] **Step 4: Add a startup test + autouse reset fixture**
 
 Append to `tests/services/test_push.py`:
 
 ```python
-def test_get_push_service_returns_none_by_default():
-    from services.push import get_push_service, set_push_service
+@pytest.fixture(autouse=True)
+def _reset_push_singleton():
+    """Each test gets a clean global singleton state. Without this autouse
+    fixture, tests can leak state through services.push._INSTANCE."""
+    from services.push import set_push_service
     set_push_service(None)
+    yield
+    set_push_service(None)
+
+
+def test_get_push_service_returns_none_by_default():
+    from services.push import get_push_service
     assert get_push_service() is None
 
 
@@ -917,10 +926,8 @@ def test_set_and_get_push_service_roundtrip():
     from services.push import get_push_service, set_push_service
     sentinel = object()
     set_push_service(sentinel)  # type: ignore[arg-type]
-    try:
-        assert get_push_service() is sentinel
-    finally:
-        set_push_service(None)
+    assert get_push_service() is sentinel
+    # autouse fixture resets after the test
 ```
 
 - [ ] **Step 5: Run all push tests**
@@ -1020,7 +1027,12 @@ sys.path.insert(0, ROOT)
 
 @pytest.fixture
 def daemon_module(monkeypatch):
-    """Import scripts/voice/livekit_client with sounddevice + livekit stubbed."""
+    """Import scripts/voice/livekit_client with sounddevice + livekit stubbed.
+
+    Uses MagicMock for fake_rtc so any module-top-level attribute access
+    (e.g. `rtc.AudioStream`, `rtc.TrackKind.KIND_AUDIO`) works lazily."""
+    from unittest.mock import MagicMock
+
     fake_sd = type(sys)("sd")
     fake_sd.RawOutputStream = lambda **kwargs: type("S", (), {
         "start": lambda self: None, "write": lambda self, data: None,
@@ -1030,10 +1042,13 @@ def daemon_module(monkeypatch):
     })()
     fake_sd.PortAudioError = type("PortAudioError", (Exception,), {})
 
-    fake_rtc = type(sys)("rtc")
+    # MagicMock — any attribute access returns a child MagicMock. Lets the
+    # daemon module import cleanly even if it references rtc.X at module scope.
+    fake_rtc = MagicMock()
+    fake_livekit = type(sys)("livekit")
+    fake_livekit.rtc = fake_rtc
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
-    monkeypatch.setitem(sys.modules, "livekit", type(sys)("livekit"))
-    sys.modules["livekit"].rtc = fake_rtc
+    monkeypatch.setitem(sys.modules, "livekit", fake_livekit)
 
     if "scripts.voice.livekit_client" in sys.modules:
         del sys.modules["scripts.voice.livekit_client"]
@@ -1398,7 +1413,7 @@ def _should_warn_rss(rss_bytes: int, cap_bytes: int) -> bool:
 
 
 async def _memory_watchdog() -> None:
-    """Log RSS every 60s; alert if >80% of PM2 cap."""
+    """Log RSS every 60s; alert if >80% of PM2 cap (single-fire per process lifetime)."""
     proc = psutil.Process()
     warned = False
     while True:
@@ -1406,9 +1421,6 @@ async def _memory_watchdog() -> None:
             rss = proc.memory_info().rss
             logger.info("daemon RSS=%dMB", rss // (1024 * 1024))
             if _should_warn_rss(rss, DAEMON_RSS_CAP_BYTES) and not warned:
-                _alert_reconnect(  # reuse alert path; semantics are "operator look here"
-                    attempt=0,  # unused in alert text below
-                )
                 try:
                     from services.alerts import send as _send
                     await _send(
@@ -1821,6 +1833,7 @@ async def main():
     last_synth = 0.0
     initial_restarts = {"daemon": None, "worker": None}
     synth_runs, synth_ok = 0, 0
+    pm2 = BurnInTickResult(ok=False)  # init for the post-loop summary
 
     with open(args.output, "a") as out:
         while time.time() < end_at:
@@ -2062,13 +2075,25 @@ git commit -m "feat(sp7): synthetic round-trip — WAV publish + transcript poll
 **Files:**
 - (No code changes — operator-side execution.)
 
-- [ ] **Step 1: 60-second smoke**
+- [ ] **Step 1: 3-minute smoke**
 
 ```bash
 VOICE_BURN_IN=1 pytest tests/integration/test_voice_burn_in_smoke.py -v
 ```
 
-Expected: passes within 90s. If it fails, debug before kicking off the full 24h.
+The smoke test internally runs `--hours 0.05` (3 minutes) — long enough for two ticks (60s each) plus the synthetic round-trip cycle to fire and emit a meaningful summary line. Expected to complete within 4 minutes wall clock. If it fails, debug before kicking off the full 24h.
+
+Adjust the smoke test if it currently uses `1.0/60.0` hours (one minute) — the harness's tick interval is 60 seconds, so a one-minute window emits zero or one tick and won't exercise the synthetic path. Update the test:
+
+```python
+# tests/integration/test_voice_burn_in_smoke.py — update --hours
+r = subprocess.run(
+    ["python", "scripts/uptime/voice_burn_in.py",
+     "--hours", "0.05",  # 3 minutes — exercises 2 ticks + synthetic
+     "--output", str(out)],
+    capture_output=True, text=True, timeout=300,
+)
+```
 
 - [ ] **Step 2: Pre-burn-in checklist**
 
@@ -2492,56 +2517,43 @@ cd frontend
 grep -rn "useQuery\|/conversations" src/ | grep -i "messages" | head -10
 ```
 
-- [ ] **Step 2: Wire `placeholderData` + `onSuccess`**
+- [ ] **Step 2: Wire cache hydration + write-back**
 
-Inside the `useQuery` call:
-
-```typescript
-import { rememberMessages, recallMessages } from "@/lib/conversation-cache";
-
-const { data: messages = [] } = useQuery({
-  queryKey: ["conversation", conversationId, "messages"],
-  queryFn: async () => {
-    const r = await fetch(`/api/conversations/${conversationId}/messages`);
-    return r.json();
-  },
-  placeholderData: () => recallMessages(conversationId),  // sync-shape; idb returns Promise — see note
-});
-
-// After the data lands, write to cache:
-useEffect(() => {
-  if (messages?.length) {
-    rememberMessages(conversationId, messages).catch((e) =>
-      console.warn("conversation cache write failed", e),
-    );
-  }
-}, [messages, conversationId]);
-```
-
-`placeholderData` expects sync data; since `recallMessages` is async we need a small adaptor. Cleanest pattern: render with `[]` initially, then `useEffect` to populate from cache:
+Use the cache as a fallback render source while the network call is in flight (TanStack Query's `placeholderData` only accepts sync values, and our cache is async). The pattern: load cache via `useEffect` into local state, fall back to it when network data is undefined.
 
 ```typescript
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { rememberMessages, recallMessages, type Message } from "@/lib/conversation-cache";
+
+// Inside the conversation component:
 const [cached, setCached] = useState<Message[]>([]);
+
+// Hydrate from IndexedDB on mount / conversation change.
 useEffect(() => {
-  recallMessages(conversationId).then(setCached);
+  recallMessages(conversationId).then(setCached).catch(console.warn);
 }, [conversationId]);
 
-const { data: networkMessages, isFetching } = useQuery({
+const { data: networkMessages } = useQuery({
   queryKey: ["conversation", conversationId, "messages"],
   queryFn: async () => {
     const r = await fetch(`/api/conversations/${conversationId}/messages`);
-    return r.json();
+    return r.json() as Promise<Message[]>;
   },
 });
 
+// Write back to cache whenever fresh network data lands.
 useEffect(() => {
   if (networkMessages?.length) {
     rememberMessages(conversationId, networkMessages).catch(console.warn);
   }
 }, [networkMessages, conversationId]);
 
+// Render: prefer fresh network data, fall back to cache while loading / offline.
 const messages = networkMessages ?? cached;
 ```
+
+This is the single pattern to use — do not also pass `placeholderData` to `useQuery`, that would conflict with the explicit fallback below the query.
 
 - [ ] **Step 3: Smoke test**
 
@@ -2904,41 +2916,37 @@ git commit -m "docs(sp7): seed v2-burn-in-checklist with FCM operator setup bloc
 
 ---
 
-### Task 5.2: `firebase-messaging-sw.js` service worker
+### Task 5.2: `firebase-messaging-sw.js` service worker (template + build-time substitution)
 
 **Files:**
-- Create: `frontend/public/firebase-messaging-sw.js`
+- Create: `frontend/firebase-messaging-sw.template.js` (committed template with `__FCM_*__` markers)
+- Create: `frontend/scripts/build-firebase-sw.mjs` (Node prebuild script)
+- Modify: `frontend/package.json` (add `prebuild` hook)
+- Modify: `frontend/.gitignore` (exclude generated SW)
 
-This SW lives at the public root (FCM's hard requirement — Firebase looks for it at `/firebase-messaging-sw.js`). It coexists with the Workbox SW; Firebase owns push events, Workbox owns fetch/cache.
+The SW must live at `dist/firebase-messaging-sw.js` (FCM hard requirement). We don't commit a placeholder file with `REPLACE_WITH_*` strings — instead a small `prebuild` step renders the SW from a template + the `VITE_FCM_*` env vars. The output file is gitignored. If env vars are missing, `prebuild` fails loud — the operator sees the error before `npm run build` even runs the Vite pipeline.
 
-- [ ] **Step 1: Locate the Firebase project config**
-
-The Firebase config is exposed via Vite env vars (`VITE_FCM_*`). In the SW we cannot use `import.meta.env` because the SW is loaded outside Vite's bundle context. Instead the SW is a **static** file that hard-codes the public-only fields, and reads the VAPID/sender at registration time from the page (passed via `messaging.getToken({vapidKey})`).
-
-- [ ] **Step 2: Write the SW**
+- [ ] **Step 1: Write the template**
 
 ```javascript
-// frontend/public/firebase-messaging-sw.js
+// frontend/firebase-messaging-sw.template.js
+// TEMPLATE — rendered to public/firebase-messaging-sw.js by
+// scripts/build-firebase-sw.mjs at prebuild time. The rendered file is
+// gitignored; this template is the source of truth.
+//
 // FCM background-message handler. Coexists with the Workbox SW; Firebase
 // owns 'push' + 'notificationclick' events, Workbox owns fetch/cache.
-// Loaded by Firebase JS SDK at /firebase-messaging-sw.js (hard convention).
-//
-// Notes:
-//   - Firebase config below holds non-secret public identifiers only. The
-//     VAPID public key + sender id are also non-secret. Service-account
-//     JSON (private) lives ONLY on the backend.
-//   - Update FCM_PROJECT_ID + messagingSenderId after Task 5.1.
 
 importScripts("https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js");
 importScripts("https://www.gstatic.com/firebasejs/10.13.0/firebase-messaging-compat.js");
 
 firebase.initializeApp({
-  apiKey: "REPLACE_WITH_FIREBASE_API_KEY",
-  authDomain: "cruz-personal.firebaseapp.com",
-  projectId: "cruz-personal",
-  storageBucket: "cruz-personal.appspot.com",
-  messagingSenderId: "REPLACE_WITH_SENDER_ID",
-  appId: "REPLACE_WITH_APP_ID",
+  apiKey: "__FCM_API_KEY__",
+  authDomain: "__FCM_AUTH_DOMAIN__",
+  projectId: "__FCM_PROJECT_ID__",
+  storageBucket: "__FCM_STORAGE_BUCKET__",
+  messagingSenderId: "__FCM_SENDER_ID__",
+  appId: "__FCM_APP_ID__",
 });
 
 const messaging = firebase.messaging();
@@ -2952,7 +2960,7 @@ messaging.onBackgroundMessage((payload) => {
     icon: "/icons/icon-192.png",
     badge: "/icons/icon-192.png",
     data: { url, trace_id: (payload.data && payload.data.trace_id) || "" },
-    tag: "cruz",         // collapse multiple notifications into one
+    tag: "cruz",
     renotify: true,
   });
 });
@@ -2962,7 +2970,6 @@ self.addEventListener("notificationclick", (event) => {
   const targetUrl = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
-      // Focus existing tab if one is open at the same origin.
       for (const w of wins) {
         if (w.url && new URL(w.url).origin === self.location.origin) {
           w.navigate(targetUrl);
@@ -2975,27 +2982,183 @@ self.addEventListener("notificationclick", (event) => {
 });
 ```
 
-- [ ] **Step 3: Add a placeholder note explaining the REPLACE_WITH tokens**
+- [ ] **Step 2: Write the prebuild script**
 
-```bash
-cat >> docs/superpowers/v2-burn-in-checklist.md <<'EOF'
+```javascript
+// frontend/scripts/build-firebase-sw.mjs
+// Renders firebase-messaging-sw.template.js → public/firebase-messaging-sw.js
+// using VITE_FCM_* env vars. Fails loud if any required var is missing.
+//
+// Run via `npm run prebuild`, which is invoked automatically by npm before
+// `npm run build`. Also runs on `npm run dev` via the script pipeline below.
 
-## frontend/public/firebase-messaging-sw.js — replace placeholders
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-After Task 5.1, edit `frontend/public/firebase-messaging-sw.js` and replace
-the four `REPLACE_WITH_*` strings with the values from Firebase Console
-(Project Settings → General → "Your apps" → Web app → Firebase SDK snippet).
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.resolve(__dirname, "..");
 
-Then run `cd frontend && npm run build` and confirm `dist/firebase-messaging-sw.js`
-contains the substituted values.
-EOF
+const REQUIRED = [
+  "VITE_FCM_API_KEY",
+  "VITE_FCM_AUTH_DOMAIN",
+  "VITE_FCM_PROJECT_ID",
+  "VITE_FCM_STORAGE_BUCKET",
+  "VITE_FCM_SENDER_ID",
+  "VITE_FCM_APP_ID",
+];
+
+const missing = REQUIRED.filter((k) => !process.env[k] || !process.env[k].trim());
+if (missing.length > 0) {
+  // Degraded mode: render a STUB SW that no-ops. Document why.
+  console.warn(
+    `[build-firebase-sw] WARNING: missing env vars (${missing.join(", ")}) — ` +
+    `writing a no-op stub SW. Push notifications will not work in this build. ` +
+    `Set the VITE_FCM_* vars in frontend/.env to enable.`,
+  );
+  const stub = `// frontend/public/firebase-messaging-sw.js — STUB
+// Generated because VITE_FCM_* env vars were missing at build time.
+// This SW is a no-op so push registration silently fails on the client side.
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+`;
+  fs.writeFileSync(path.join(ROOT, "public", "firebase-messaging-sw.js"), stub);
+  process.exit(0);
+}
+
+const template = fs.readFileSync(
+  path.join(ROOT, "firebase-messaging-sw.template.js"), "utf8",
+);
+let rendered = template;
+for (const key of REQUIRED) {
+  // Strip the VITE_ prefix to match the marker (__FCM_API_KEY__ etc.)
+  const marker = `__${key.replace(/^VITE_/, "")}__`;
+  rendered = rendered.replaceAll(marker, process.env[key]);
+}
+// Sanity check — no unsubstituted markers remain.
+const leftovers = rendered.match(/__FCM_[A-Z_]+__/g);
+if (leftovers) {
+  console.error(
+    `[build-firebase-sw] ERROR: unsubstituted markers remain: ${leftovers.join(", ")}`,
+  );
+  process.exit(1);
+}
+
+fs.mkdirSync(path.join(ROOT, "public"), { recursive: true });
+fs.writeFileSync(
+  path.join(ROOT, "public", "firebase-messaging-sw.js"),
+  rendered,
+);
+console.log("[build-firebase-sw] wrote public/firebase-messaging-sw.js");
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Add the prebuild hook**
+
+In `frontend/package.json`, add to `scripts`:
+
+```json
+"scripts": {
+  "predev": "node scripts/build-firebase-sw.mjs",
+  "dev": "vite",
+  "prebuild": "node scripts/build-firebase-sw.mjs",
+  "build": "tsc -b && vite build",
+  ...
+}
+```
+
+- [ ] **Step 4: Gitignore the generated SW**
+
+Append to `frontend/.gitignore` (create if missing):
+
+```
+# Generated at prebuild time from firebase-messaging-sw.template.js
+public/firebase-messaging-sw.js
+```
+
+- [ ] **Step 5: Smoke test the prebuild**
+
+With env vars unset:
+```bash
+cd frontend
+npm run prebuild
+ls public/firebase-messaging-sw.js
+cat public/firebase-messaging-sw.js | head -3
+```
+Expected: stub SW written, warning printed, `npm run prebuild` exits 0 (degraded-mode path).
+
+With env vars set (use placeholder real values for the smoke test):
+```bash
+cd frontend
+VITE_FCM_API_KEY=test-key \
+VITE_FCM_AUTH_DOMAIN=test.firebaseapp.com \
+VITE_FCM_PROJECT_ID=test \
+VITE_FCM_STORAGE_BUCKET=test.appspot.com \
+VITE_FCM_SENDER_ID=12345 \
+VITE_FCM_APP_ID=1:12345:web:abc \
+npm run prebuild
+grep "test-key" public/firebase-messaging-sw.js
+```
+Expected: rendered SW contains the substituted values, no `__FCM_*__` markers remain.
+
+- [ ] **Step 6: Add a unit test for the prebuild script**
+
+```javascript
+// frontend/scripts/__tests__/build-firebase-sw.test.mjs
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+const SCRIPT = path.resolve("scripts/build-firebase-sw.mjs");
+const OUT = path.resolve("public/firebase-messaging-sw.js");
+
+function runScript(env) {
+  return execSync(`node ${SCRIPT}`, {
+    env: { ...process.env, ...env, PATH: process.env.PATH },
+    encoding: "utf8",
+  });
+}
+
+describe("build-firebase-sw", () => {
+  beforeEach(() => { if (fs.existsSync(OUT)) fs.unlinkSync(OUT); });
+  afterEach(() => { if (fs.existsSync(OUT)) fs.unlinkSync(OUT); });
+
+  it("writes a stub SW when env vars are missing", () => {
+    runScript({
+      VITE_FCM_API_KEY: "", VITE_FCM_AUTH_DOMAIN: "",
+      VITE_FCM_PROJECT_ID: "", VITE_FCM_STORAGE_BUCKET: "",
+      VITE_FCM_SENDER_ID: "", VITE_FCM_APP_ID: "",
+    });
+    expect(fs.existsSync(OUT)).toBe(true);
+    const text = fs.readFileSync(OUT, "utf8");
+    expect(text).toMatch(/STUB/);
+  });
+
+  it("substitutes env values into the template when all set", () => {
+    runScript({
+      VITE_FCM_API_KEY: "real-key",
+      VITE_FCM_AUTH_DOMAIN: "real.firebaseapp.com",
+      VITE_FCM_PROJECT_ID: "real-proj",
+      VITE_FCM_STORAGE_BUCKET: "real.appspot.com",
+      VITE_FCM_SENDER_ID: "987",
+      VITE_FCM_APP_ID: "1:987:web:xyz",
+    });
+    const text = fs.readFileSync(OUT, "utf8");
+    expect(text).toMatch(/real-key/);
+    expect(text).not.toMatch(/__FCM_/);
+  });
+});
+```
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add frontend/public/firebase-messaging-sw.js docs/superpowers/v2-burn-in-checklist.md
-git commit -m "feat(sp7): firebase-messaging-sw.js — push + notificationclick handlers"
+git add frontend/firebase-messaging-sw.template.js \
+        frontend/scripts/build-firebase-sw.mjs \
+        frontend/scripts/__tests__/build-firebase-sw.test.mjs \
+        frontend/package.json frontend/.gitignore
+git commit -m "feat(sp7): firebase-messaging-sw build-time template substitution (no committed placeholders)"
 ```
 
 ---
@@ -3153,6 +3316,12 @@ export function EnableNotifications() {
   async function enable() {
     setPending(true);
     try {
+      // Degraded mode: env vars not set → tell the user, don't crash.
+      if (!FIREBASE_CONFIG.apiKey) {
+        alert("Push notifications aren't configured in this build. " +
+              "Set VITE_FCM_* env vars and rebuild.");
+        return;
+      }
       const supported = await isSupported();
       if (!supported) {
         alert("This browser does not support web push notifications.");
@@ -3434,117 +3603,268 @@ chmod +x scripts/wakeword/train_hey_cruz.sh
 
 - [ ] **Step 2: Python training script**
 
+The training pipeline follows openwakeword 0.6.x's documented "automatic model training" workflow (upstream notebook: `notebooks/automatic_model_training.ipynb`). We adapt that workflow into a runnable script. The script does FOUR concrete things:
+
+1. **Generate synthetic positives** via Piper TTS — N voices × varied prompts → ~3000 WAV clips
+2. **Source negatives** by downloading a small subset of Common Voice (~3000 clips, English, varied speakers)
+3. **Train** the wake-word classifier using openwakeword's `openwakeword.train.train_model` (the actual public function in 0.6.x; verify at runtime with `python -c "from openwakeword.train import train_model"`)
+4. **Score** 100 held-out synthetic positives and 1000 random Common Voice negatives via `Model.predict()` → real percentile data → ROC table
+
 ```python
 # scripts/wakeword/synth_train.py
-"""Synthetic-only Hey CRUZ openWakeWord training.
+"""Synthetic-first Hey CRUZ openWakeWord training.
 
 Runs INSIDE the cruz-wakeword-trainer container (Dockerfile in this dir).
-Uses Piper TTS to synthesize ~3000 positive samples + Common Voice random
-clips for negatives, trains a small classifier head on openWakeWord's
-embeddings, exports ONNX, writes a ROC table.
+
+Pipeline:
+  1. Piper TTS → ~3000 synthetic positive WAV clips into work/positive/
+  2. Common Voice download → ~3000 negative clips into work/negative/
+  3. openwakeword.train.train_model → ONNX into models/hey_cruz.onnx
+  4. Held-out scoring → score arrays → docs/perf/sp7-wake-word-roc.md
 
 Output paths (relative to /work which is bind-mounted from scripts/wakeword/):
     models/hey_cruz.onnx
     /perf/sp7-wake-word-roc.md
+
+If openwakeword 0.6.x's training API changes upstream, the import block
+fails LOUD with a clear remediation message — never silently produces a
+fake ROC.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import random
+import subprocess
 import sys
+import wave
 from pathlib import Path
+from typing import List
+
+# ── Upstream API contract — fail loud if missing ─────────────────────────
+try:
+    from openwakeword import Model
+    from openwakeword.utils import download_models as _download_pretrained
+    # The training entry point in openwakeword 0.6.x. If this import fails,
+    # upstream has restructured — fix the script before continuing.
+    from openwakeword.train import train_model as _train_model  # type: ignore
+except ImportError as exc:
+    raise SystemExit(
+        f"openwakeword 0.6.x training API mismatch: {exc}\n"
+        "Either pin openwakeword==0.6.* in scripts/wakeword/Dockerfile, "
+        "or update synth_train.py to match upstream's current train entry point. "
+        "See https://github.com/dscripka/openWakeWord/blob/main/notebooks/"
+        "automatic_model_training.ipynb for the canonical workflow."
+    ) from exc
+
+
+N_POSITIVE = 3000
+N_NEGATIVE = 3000
+N_HELDOUT_POS = 100
+N_HELDOUT_NEG = 1000
+
+POSITIVE_PROMPTS = [
+    "hey cruz", "hey cruz can you", "hey cruz please",
+    "hey cruz what's", "hey cruz tell me", "hey cruz are you",
+    "hey cruz did you", "hey cruz how's", "hey cruz it's",
+]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--with-real", action="store_true")
+    ap.add_argument("--with-real", action="store_true",
+                    help="Mix in samples from /work/samples/positive/ if present")
     ap.add_argument("--seed", type=int, default=20260510)
     args = ap.parse_args()
 
     random.seed(args.seed)
 
-    out_dir = Path("/work/models")
+    work = Path("/work")
+    pos_dir = work / "build" / "positive"
+    neg_dir = work / "build" / "negative"
+    pos_dir.mkdir(parents=True, exist_ok=True)
+    neg_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = work / "models"
     out_dir.mkdir(parents=True, exist_ok=True)
     perf_dir = Path("/perf")
     perf_dir.mkdir(parents=True, exist_ok=True)
 
-    # The actual training is delegated to openWakeWord's stock pipeline.
-    # The recipe below mirrors openwakeword.train.train_classifier_with_synthetic
-    # from upstream — we keep it inline here to insulate from upstream churn.
-    print("Generating ~3000 synthetic positive samples via Piper TTS...", flush=True)
-    # ---- delegate to upstream synthetic generator
-    from openwakeword.utils import download_models
-    download_models()
+    print(f"[1/4] Generating {N_POSITIVE} synthetic positives via Piper TTS...",
+          flush=True)
+    _generate_piper_positives(pos_dir, N_POSITIVE, args.seed)
 
-    try:
-        from openwakeword.train import train_synthetic
-    except ImportError:
-        # Older openwakeword versions expose the function differently;
-        # fall back to the documented two-step API.
-        from openwakeword.train import auto_train  # type: ignore
-        train_synthetic = auto_train
+    if args.with_real:
+        real_dir = work / "samples" / "positive"
+        if real_dir.exists():
+            real_count = sum(1 for _ in real_dir.glob("*.wav"))
+            print(f"      + mixing in {real_count} real samples from {real_dir}",
+                  flush=True)
+            for src in real_dir.glob("*.wav"):
+                dst = pos_dir / f"real_{src.name}"
+                dst.write_bytes(src.read_bytes())
 
-    model_path = train_synthetic(
-        wake_word="hey cruz",
-        output_dir=str(out_dir),
-        n_positive_samples=3000,
+    print(f"[2/4] Sourcing {N_NEGATIVE} negative clips (Common Voice subset)...",
+          flush=True)
+    _ensure_common_voice_subset(neg_dir, N_NEGATIVE, args.seed)
+
+    print("[3/4] Training the openwakeword classifier head...", flush=True)
+    # Pre-fetch openwakeword's pretrained embedder weights.
+    _download_pretrained()
+    final_path = out_dir / "hey_cruz.onnx"
+    _train_model(
+        wake_phrase="hey cruz",
+        positive_audio_dir=str(pos_dir),
+        negative_audio_dir=str(neg_dir),
+        output_path=str(final_path),
         seed=args.seed,
     )
-    final_path = out_dir / "hey_cruz.onnx"
-    if model_path != str(final_path):
-        os.replace(model_path, final_path)
-    print(f"✓ Wrote {final_path}", flush=True)
+    if not final_path.exists():
+        raise SystemExit(
+            f"_train_model returned but {final_path} was not produced. "
+            "Inspect train_model output above for cause."
+        )
+    print(f"      ✓ Wrote {final_path}", flush=True)
 
-    # ---- ROC table
-    print("Computing ROC on held-out positives + Common Voice negatives...", flush=True)
-    roc_lines = _compute_roc(final_path, args.seed)
+    print(f"[4/4] Scoring held-out: {N_HELDOUT_POS} pos, {N_HELDOUT_NEG} neg...",
+          flush=True)
+    held_pos_dir = work / "build" / "heldout_positive"
+    held_neg_dir = work / "build" / "heldout_negative"
+    held_pos_dir.mkdir(parents=True, exist_ok=True)
+    held_neg_dir.mkdir(parents=True, exist_ok=True)
+    _generate_piper_positives(held_pos_dir, N_HELDOUT_POS, args.seed + 1)
+    _ensure_common_voice_subset(held_neg_dir, N_HELDOUT_NEG, args.seed + 1)
+
+    pos_scores = _score_clips(final_path, held_pos_dir)
+    neg_scores = _score_clips(final_path, held_neg_dir)
+
+    if not pos_scores or not neg_scores:
+        raise SystemExit(
+            f"Held-out scoring returned empty: pos={len(pos_scores)} "
+            f"neg={len(neg_scores)}. Cannot write a meaningful ROC."
+        )
+
+    roc_lines = _build_roc_lines(pos_scores, neg_scores, args.seed, final_path)
     (perf_dir / "sp7-wake-word-roc.md").write_text("\n".join(roc_lines) + "\n")
-    print(f"✓ Wrote /perf/sp7-wake-word-roc.md", flush=True)
+    print(f"      ✓ Wrote /perf/sp7-wake-word-roc.md", flush=True)
 
     return 0
 
 
-def _compute_roc(model_path: Path, seed: int) -> list[str]:
-    """Score a 100-positive / 1000-negative set, return Markdown lines."""
+def _generate_piper_positives(out_dir: Path, n: int, seed: int) -> None:
+    """Run piper-tts CLI N times to synthesize 'hey cruz' WAVs.
+    Piper voices are ~30MB each; one voice is plenty for synthetic-first."""
+    voice = os.environ.get("PIPER_VOICE", "en_US-libritts-high")
+    rng = random.Random(seed)
+    for i in range(n):
+        prompt = rng.choice(POSITIVE_PROMPTS)
+        out = out_dir / f"hey_cruz_{i:05d}.wav"
+        # piper writes WAV when given --output_file; sample rate fixed at 22050,
+        # we resample down to 16000 with sox for openwakeword.
+        tmp = out_dir / f".tmp_{i:05d}.wav"
+        subprocess.run(
+            ["piper", "--model", voice, "--output_file", str(tmp)],
+            input=prompt.encode(),
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["sox", str(tmp), "-r", "16000", "-c", "1", "-b", "16", str(out)],
+            check=True, capture_output=True,
+        )
+        tmp.unlink()
+
+
+def _ensure_common_voice_subset(out_dir: Path, n: int, seed: int) -> None:
+    """If out_dir already has ≥ n WAVs, skip download. Else download a
+    Common Voice English mini subset and resample to 16kHz mono."""
+    existing = sorted(out_dir.glob("*.wav"))
+    if len(existing) >= n:
+        return
+    cache = Path("/work/.cache/common_voice_en_subset")
+    if not cache.exists():
+        cache.mkdir(parents=True, exist_ok=True)
+        # Use the openwakeword-recommended mini subset (small, public).
+        # Falls back to Mozilla CV if a curated mirror is unavailable.
+        url = os.environ.get(
+            "CV_SUBSET_URL",
+            "https://huggingface.co/datasets/openwakeword/common_voice_en_mini/"
+            "resolve/main/cv-en-mini.tar.gz",
+        )
+        subprocess.run(
+            ["curl", "-L", "-o", str(cache / "cv.tar.gz"), url],
+            check=True,
+        )
+        subprocess.run(
+            ["tar", "-xzf", str(cache / "cv.tar.gz"), "-C", str(cache)],
+            check=True,
+        )
+    rng = random.Random(seed)
+    all_clips = sorted(cache.rglob("*.wav")) or sorted(cache.rglob("*.mp3"))
+    if len(all_clips) < n:
+        raise SystemExit(
+            f"Common Voice subset has only {len(all_clips)} clips, need {n}. "
+            f"Set CV_SUBSET_URL to a larger mirror, or reduce N_NEGATIVE."
+        )
+    chosen = rng.sample(all_clips, n)
+    for i, src in enumerate(chosen):
+        dst = out_dir / f"neg_{i:05d}.wav"
+        subprocess.run(
+            ["sox", str(src), "-r", "16000", "-c", "1", "-b", "16", str(dst)],
+            check=True, capture_output=True,
+        )
+
+
+def _score_clips(model_path: Path, clip_dir: Path) -> List[float]:
+    """Run Model.predict() on each WAV and return the max wake-word score."""
     import numpy as np
-    from openwakeword import Model
-    # synthesize 100 positives via Piper for the held-out test
-    # (in practice, openwakeword.train provides a held_out_dataset utility;
-    # if upstream API is unstable, this is a thin reimpl)
-    pos_scores: list[float] = []
-    neg_scores: list[float] = []
-    model = Model(wakeword_models=[str(model_path)], inference_framework="onnx")
+    model = Model(
+        wakeword_models=[str(model_path)],
+        inference_framework="onnx",
+    )
+    scores: List[float] = []
+    for wav in sorted(clip_dir.glob("*.wav")):
+        with wave.open(str(wav), "rb") as wf:
+            audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+        # Feed in 1280-sample chunks; capture max over all frames in the clip.
+        clip_max = 0.0
+        for i in range(0, len(audio) - 1280, 1280):
+            frame = audio[i:i+1280]
+            preds = model.predict(frame)
+            if isinstance(preds, dict):
+                m = max(preds.values(), default=0.0)
+                clip_max = max(clip_max, float(m))
+        scores.append(clip_max)
+        # Reset model state between clips.
+        if hasattr(model, "reset"):
+            model.reset()
+    return scores
 
-    # NOTE: The actual sample generation is intentionally elided here —
-    # it depends on the upstream openwakeword.train helpers which evolve.
-    # The training run prints scores to stdout; capture them in lists.
-    # If upstream change breaks this, the script must be updated to match.
 
-    # Stub fall-back for environments where the helpers aren't present:
-    if not pos_scores:
-        pos_scores = [0.85 + 0.1 * random.random() for _ in range(100)]
-    if not neg_scores:
-        neg_scores = [0.05 + 0.1 * random.random() for _ in range(1000)]
-
-    pos = np.array(pos_scores)
-    neg = np.array(neg_scores)
-    pos_p50, pos_p05 = float(np.percentile(pos, 50)), float(np.percentile(pos, 5))
-    neg_p95, neg_p99 = float(np.percentile(neg, 95)), float(np.percentile(neg, 99))
+def _build_roc_lines(
+    pos: List[float], neg: List[float], seed: int, model_path: Path,
+) -> list[str]:
+    import numpy as np
+    pos_arr, neg_arr = np.array(pos), np.array(neg)
+    pos_p50, pos_p05 = float(np.percentile(pos_arr, 50)), float(np.percentile(pos_arr, 5))
+    neg_p95, neg_p99 = float(np.percentile(neg_arr, 95)), float(np.percentile(neg_arr, 99))
     recommended = round(neg_p95, 2)
-
-    lines = [
+    return [
         "# Hey CRUZ — Wake-Word ROC",
         "",
-        f"**Model:** `scripts/wakeword/models/hey_cruz.onnx`",
+        f"**Model:** `scripts/wakeword/models/{model_path.name}`",
         f"**Seed:** {seed}",
+        f"**Held-out:** {len(pos)} positive (Piper-synth, distinct seed) "
+        f"+ {len(neg)} negative (Common Voice random)",
         "",
         "## Score percentiles",
         "",
-        "| Set | p5 / p95 | p50 / p99 |",
-        "|---|---|---|",
-        f"| Positive (n=100, held-out) | p5={pos_p05:.3f} | p50={pos_p50:.3f} |",
-        f"| Negative (n=1000, Common Voice random) | p95={neg_p95:.3f} | p99={neg_p99:.3f} |",
+        "| Set | p5 | p50 | p95 | p99 |",
+        "|---|---|---|---|---|",
+        f"| Positive | {pos_p05:.3f} | {pos_p50:.3f} | "
+        f"{float(np.percentile(pos_arr, 95)):.3f} | "
+        f"{float(np.percentile(pos_arr, 99)):.3f} |",
+        f"| Negative | {float(np.percentile(neg_arr, 5)):.3f} | "
+        f"{float(np.percentile(neg_arr, 50)):.3f} | "
+        f"{neg_p95:.3f} | {neg_p99:.3f} |",
         "",
         "## Recommended threshold",
         "",
@@ -3554,12 +3874,26 @@ def _compute_roc(model_path: Path, seed: int) -> list[str]:
         "Tune by setting `WAKE_WORD_THRESHOLD` in `.env`. Lower = more sensitive "
         "(more FPs); higher = stricter (more FNs).",
     ]
-    return lines
 
 
 if __name__ == "__main__":
     sys.exit(main())
 ```
+
+**Why this works.**
+- Imports fail loud if openwakeword's API differs — no silent fallback, no fake ROC.
+- All four pipeline stages produce real artefacts: positives (Piper output WAVs), negatives (Common Voice WAVs), trained ONNX (real `train_model` call), held-out scores (real `Model.predict()` calls).
+- The Dockerfile (Task 6.1) installs `piper-tts` and `sox`, plus `curl` and `tar` for the Common Voice subset download.
+- ROC numbers are rounded to 3 decimals and computed from real percentile data — never randomized.
+
+**Pre-flight verification before running training.** Before Task 6.5 actually runs the pipeline, do a quick API-compatibility check:
+
+```bash
+docker run --rm cruz-wakeword-trainer -lc \
+    'python -c "from openwakeword.train import train_model; print(train_model.__doc__[:200])"'
+```
+
+If this fails, **fix `synth_train.py` to match the actual upstream API before proceeding.** Per the import-block contract above, the script will not produce a fake ROC if upstream changes — it will exit loud.
 
 - [ ] **Step 3: Commit**
 
@@ -3858,70 +4192,166 @@ git commit -m "feat(sp7): committed hey_cruz.onnx (synthetic-only train) + ROC +
 - Modify: `agents/pulse/pulse_agent.py`
 - Modify: `tests/agents/test_pulse_agent.py`
 
-- [ ] **Step 1: Failing test**
+The pattern across Tasks 7.1, 7.2, 7.3 is: extract a small helper method on the agent that does the push dispatch, then unit-test the helper directly with a fully-mocked PushService. This keeps the tests independent of each agent's existing fixture conventions (which vary across PULSE/CATCH/CRUZ test files).
 
-Append to `tests/agents/test_pulse_agent.py`:
+- [ ] **Step 1: Failing test for the helper**
+
+Create `tests/agents/test_pulse_push.py` (a new dedicated file — does not collide with `test_pulse_agent.py` and does not need to import its fixtures):
 
 ```python
+"""Tests for PULSE → FCM push dispatch. Helper-level unit tests."""
+from unittest.mock import AsyncMock
+
+import pytest
+
+
+@pytest.fixture
+def fake_push():
+    p = AsyncMock()
+    p.send_to_user = AsyncMock(return_value=[])
+    return p
+
+
 @pytest.mark.asyncio
-async def test_pulse_fires_push_on_briefing_ready(monkeypatch):
-    """PULSE.process() finalisation must call push.send_to_user with a
-    'Morning briefing ready' payload when a service is configured."""
-    fake_push = AsyncMock()
-    fake_push.send_to_user = AsyncMock(return_value=[])
+async def test_pulse_helper_calls_push_with_briefing_title(fake_push, monkeypatch):
+    """PulseAgent._dispatch_briefing_push fires send_to_user with a
+    'Morning briefing ready' title and the count in the body."""
     monkeypatch.setattr(
         "agents.pulse.pulse_agent.get_push_service", lambda: fake_push,
     )
-    # ... build the agent with the existing fixture pattern, run process(),
-    # then assert
     from agents.pulse.pulse_agent import PulseAgent
     agent = PulseAgent()
-    # Use whatever AgentInput fixture/path the existing tests use:
-    result = await agent.process(<existing-fixture-call>)  # adapt
+    await agent._dispatch_briefing_push(
+        user_id=1,
+        item_count=7,
+        conversation_id="conv-abc",
+        trace_id="trace-xyz",
+    )
     fake_push.send_to_user.assert_awaited_once()
-    args, kwargs = fake_push.send_to_user.await_args
-    payload = kwargs.get("payload") or args[1]
+    kwargs = fake_push.send_to_user.await_args.kwargs
+    assert kwargs["user_id"] == 1
+    payload = kwargs["payload"]
     assert "briefing" in payload.title.lower()
+    assert "7" in payload.body
+    assert payload.url == "/conversations/conv-abc"
+    assert payload.trace_id == "trace-xyz"
+
+
+@pytest.mark.asyncio
+async def test_pulse_helper_no_op_when_push_service_none(fake_push, monkeypatch):
+    """Degraded mode (FCM not configured) — helper is a clean no-op."""
+    monkeypatch.setattr(
+        "agents.pulse.pulse_agent.get_push_service", lambda: None,
+    )
+    from agents.pulse.pulse_agent import PulseAgent
+    await PulseAgent()._dispatch_briefing_push(
+        user_id=1, item_count=5, conversation_id="x", trace_id="y",
+    )
+    fake_push.send_to_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pulse_helper_swallows_push_failures(fake_push, monkeypatch):
+    """Push dispatch errors must not bubble up from PULSE."""
+    fake_push.send_to_user.side_effect = RuntimeError("FCM down")
+    monkeypatch.setattr(
+        "agents.pulse.pulse_agent.get_push_service", lambda: fake_push,
+    )
+    from agents.pulse.pulse_agent import PulseAgent
+    # Must NOT raise.
+    await PulseAgent()._dispatch_briefing_push(
+        user_id=1, item_count=5, conversation_id="x", trace_id="y",
+    )
 ```
 
-(Inspect existing `test_pulse_agent.py` fixtures and copy the pattern for constructing an `AgentInput` — likely `make_agent_input(...)` or similar.)
+- [ ] **Step 2: Run; verify failures**
 
-- [ ] **Step 2: Implement in `pulse_agent.py`**
+```bash
+pytest tests/agents/test_pulse_push.py -v
+```
 
-At the end of `process()`, after the briefing is finalised and before returning the success `AgentOutput`:
+Expected: 3 failures (helper doesn't exist).
+
+- [ ] **Step 3: Implement the helper + the call site**
+
+In `agents/pulse/pulse_agent.py`, add the helper method to the agent class:
 
 ```python
+    async def _dispatch_briefing_push(
+        self,
+        user_id: int,
+        item_count: int,
+        conversation_id: str,
+        trace_id: str,
+    ) -> None:
+        """Fire an FCM push announcing that the morning briefing is ready.
+        Best-effort: degraded-mode no-op when FCM not configured; swallows
+        all dispatch errors so a bad FCM state can't break the briefing job."""
         try:
             from services.push import PushPayload, get_push_service
             push = get_push_service()
-            if push is not None:
-                count = self._summarise_count(briefing)  # adapt to existing model
-                await push.send_to_user(
-                    user_id=context.get("user_id", 1),
-                    payload=PushPayload(
-                        title="Morning briefing ready",
-                        body=f"{count} items waiting",
-                        url=f"/conversations/{conversation_id}",
-                        trace_id=trace_id,
-                    ),
-                )
+            if push is None:
+                return
+            await push.send_to_user(
+                user_id=user_id,
+                payload=PushPayload(
+                    title="Morning briefing ready",
+                    body=f"{item_count} items waiting",
+                    url=f"/conversations/{conversation_id}",
+                    trace_id=trace_id,
+                ),
+            )
         except Exception:
-            self.logger.warning("pulse push dispatch failed (non-fatal)", exc_info=True)
+            self.logger.warning(
+                "pulse push dispatch failed (non-fatal)", exc_info=True,
+            )
 ```
 
-If `_summarise_count` doesn't exist, inline a quick `len(briefing.items)` or whatever the briefing struct exposes.
+Then add the call site at the end of `process()`. First locate where the briefing finishes — `grep -n "return AgentOutput\|return self._success" agents/pulse/pulse_agent.py` to find the success-return paths. Immediately before the success return, add:
 
-- [ ] **Step 3: Run; verify pass**
-
-```bash
-pytest tests/agents/test_pulse_agent.py -v
+```python
+        # Best-effort push notification.
+        await self._dispatch_briefing_push(
+            user_id=(input.context or {}).get("user_id", 1),
+            item_count=_count_briefing_items(briefing),  # see helper below
+            conversation_id=input.conversation_id,
+            trace_id=input.trace_id,
+        )
 ```
 
-- [ ] **Step 4: Commit**
+Where `_count_briefing_items` is a tiny module-level helper that handles the briefing struct. If `briefing` is a dict with a list under e.g. `"items"`:
+
+```python
+def _count_briefing_items(briefing) -> int:
+    """Return the count of actionable items in a PULSE briefing.
+    Tolerates dict / dataclass / list shapes — PULSE has evolved over time."""
+    if briefing is None:
+        return 0
+    if isinstance(briefing, list):
+        return len(briefing)
+    if isinstance(briefing, dict):
+        for key in ("items", "actionable", "highlights"):
+            if isinstance(briefing.get(key), list):
+                return len(briefing[key])
+    if hasattr(briefing, "items") and isinstance(briefing.items, list):
+        return len(briefing.items)
+    return 0
+```
+
+Place `_count_briefing_items` near the top of `pulse_agent.py` (module-level helper, importable from tests if needed).
+
+- [ ] **Step 4: Run; verify pass**
 
 ```bash
-git add agents/pulse/pulse_agent.py tests/agents/test_pulse_agent.py
-git commit -m "feat(sp7): PULSE fires FCM push on briefing-ready"
+pytest tests/agents/test_pulse_push.py -v
+pytest tests/agents/test_pulse_agent.py -v   # existing tests still green
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add agents/pulse/pulse_agent.py tests/agents/test_pulse_push.py
+git commit -m "feat(sp7): PULSE fires FCM push on briefing-ready (helper-level tests)"
 ```
 
 ---
@@ -3932,56 +4362,137 @@ git commit -m "feat(sp7): PULSE fires FCM push on briefing-ready"
 - Modify: `agents/catch/catch_agent.py`
 - Modify: `tests/agents/test_catch_agent.py`
 
-Same pattern as Task 7.1.
+Same helper-level test pattern as Task 7.1.
 
 - [ ] **Step 1: Failing test**
 
+Create `tests/agents/test_catch_push.py`:
+
 ```python
+"""Tests for CATCH → FCM push dispatch. Helper-level unit tests."""
+from unittest.mock import AsyncMock
+
+import pytest
+
+
+@pytest.fixture
+def fake_push():
+    p = AsyncMock()
+    p.send_to_user = AsyncMock(return_value=[])
+    return p
+
+
 @pytest.mark.asyncio
-async def test_catch_fires_push_on_summary_ready(monkeypatch):
-    fake_push = AsyncMock()
-    fake_push.send_to_user = AsyncMock(return_value=[])
+async def test_catch_helper_fires_with_meeting_title(fake_push, monkeypatch):
     monkeypatch.setattr(
         "agents.catch.catch_agent.get_push_service", lambda: fake_push,
     )
     from agents.catch.catch_agent import CatchAgent
-    agent = CatchAgent()
-    result = await agent.process(<existing-fixture-call>)  # adapt
+    await CatchAgent()._dispatch_summary_push(
+        user_id=1,
+        meeting_title="AMA design review",
+        action_count=4,
+        conversation_id="conv-1",
+        trace_id="t-1",
+    )
     fake_push.send_to_user.assert_awaited_once()
-    args, kwargs = fake_push.send_to_user.await_args
-    payload = kwargs.get("payload") or args[1]
-    assert "captured" in payload.title.lower() or "summary" in payload.title.lower()
+    payload = fake_push.send_to_user.await_args.kwargs["payload"]
+    assert "AMA design review" in payload.title
+    assert "captured" in payload.title.lower()
+    assert "4" in payload.body
+
+
+@pytest.mark.asyncio
+async def test_catch_helper_no_op_when_push_service_none(fake_push, monkeypatch):
+    monkeypatch.setattr(
+        "agents.catch.catch_agent.get_push_service", lambda: None,
+    )
+    from agents.catch.catch_agent import CatchAgent
+    await CatchAgent()._dispatch_summary_push(
+        user_id=1, meeting_title="x", action_count=0,
+        conversation_id="c", trace_id="t",
+    )
+    fake_push.send_to_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catch_helper_swallows_dispatch_errors(fake_push, monkeypatch):
+    fake_push.send_to_user.side_effect = RuntimeError("FCM 503")
+    monkeypatch.setattr(
+        "agents.catch.catch_agent.get_push_service", lambda: fake_push,
+    )
+    from agents.catch.catch_agent import CatchAgent
+    # Must NOT raise.
+    await CatchAgent()._dispatch_summary_push(
+        user_id=1, meeting_title="x", action_count=0,
+        conversation_id="c", trace_id="t",
+    )
 ```
 
-- [ ] **Step 2: Implement**
+- [ ] **Step 2: Run; verify failures**
 
-In `agents/catch/catch_agent.py`, after the transcript + summary lands and before returning success:
+```bash
+pytest tests/agents/test_catch_push.py -v
+```
+
+- [ ] **Step 3: Implement**
+
+In `agents/catch/catch_agent.py`, add the helper:
 
 ```python
+    async def _dispatch_summary_push(
+        self,
+        user_id: int,
+        meeting_title: str,
+        action_count: int,
+        conversation_id: str,
+        trace_id: str,
+    ) -> None:
+        """Fire FCM push announcing meeting summary is ready. Best-effort."""
         try:
             from services.push import PushPayload, get_push_service
             push = get_push_service()
-            if push is not None:
-                meeting_title = (input.context or {}).get("meeting_title", "Meeting")
-                action_count = len(action_items) if action_items else 0
-                await push.send_to_user(
-                    user_id=context.get("user_id", 1),
-                    payload=PushPayload(
-                        title=f"{meeting_title} captured",
-                        body=f"{action_count} action items extracted",
-                        url=f"/conversations/{conversation_id}",
-                        trace_id=trace_id,
-                    ),
-                )
+            if push is None:
+                return
+            await push.send_to_user(
+                user_id=user_id,
+                payload=PushPayload(
+                    title=f"{meeting_title} captured",
+                    body=f"{action_count} action items extracted",
+                    url=f"/conversations/{conversation_id}",
+                    trace_id=trace_id,
+                ),
+            )
         except Exception:
-            self.logger.warning("catch push dispatch failed (non-fatal)", exc_info=True)
+            self.logger.warning(
+                "catch push dispatch failed (non-fatal)", exc_info=True,
+            )
 ```
 
-- [ ] **Step 3: Run + commit**
+Then add the call site near the existing success-return path. `grep -n "return AgentOutput\|return self._success" agents/catch/catch_agent.py` to locate. Just before the return:
+
+```python
+        meeting_title = (input.context or {}).get("meeting_title", "Meeting")
+        action_count = len(action_items) if isinstance(action_items, list) else 0
+        await self._dispatch_summary_push(
+            user_id=(input.context or {}).get("user_id", 1),
+            meeting_title=meeting_title,
+            action_count=action_count,
+            conversation_id=input.conversation_id,
+            trace_id=input.trace_id,
+        )
+```
+
+- [ ] **Step 4: Run; verify pass + existing CATCH tests still green**
 
 ```bash
-pytest tests/agents/test_catch_agent.py -v
-git add agents/catch/catch_agent.py tests/agents/test_catch_agent.py
+pytest tests/agents/test_catch_push.py tests/agents/test_catch_agent.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add agents/catch/catch_agent.py tests/agents/test_catch_push.py
 git commit -m "feat(sp7): CATCH fires FCM push on meeting summary ready"
 ```
 
@@ -3993,49 +4504,129 @@ git commit -m "feat(sp7): CATCH fires FCM push on meeting summary ready"
 - Modify: `agents/cruz/cruz_agent.py`
 - Modify: `tests/agents/test_cruz_agent.py`
 
+Same helper-level pattern.
+
 - [ ] **Step 1: Failing test**
 
+Create `tests/agents/test_cruz_push.py`:
+
 ```python
+"""Tests for CRUZ → FCM push on sub-agent approval gate."""
+from unittest.mock import AsyncMock
+
+import pytest
+
+from agents.base_agent import AgentOutput
+
+
+@pytest.fixture
+def fake_push():
+    p = AsyncMock()
+    p.send_to_user = AsyncMock(return_value=[])
+    return p
+
+
+def _approval_output(agent: str = "echo", prompt: str = "send 3 emails?"):
+    return AgentOutput(
+        success=True, result=None, agent=agent, duration_ms=10,
+        requires_approval=True, approval_prompt=prompt,
+    )
+
+
 @pytest.mark.asyncio
-async def test_cruz_fires_push_when_subagent_requires_approval(monkeypatch):
-    """When a delegated tool returns AgentOutput(requires_approval=True),
-    CRUZ must dispatch a push so the user can review on whichever device."""
-    fake_push = AsyncMock()
-    fake_push.send_to_user = AsyncMock(return_value=[])
+async def test_cruz_helper_fires_when_sub_requires_approval(fake_push, monkeypatch):
     monkeypatch.setattr(
         "agents.cruz.cruz_agent.get_push_service", lambda: fake_push,
     )
-    # Build a tool result with requires_approval=True, run the dispatch path,
-    # assert the push is fired with the approval_prompt as the body.
-    # Adapt to the existing CRUZ test fixture pattern:
     from agents.cruz.cruz_agent import CruzAgent
-    from agents.base_agent import AgentOutput
-    sub_result = AgentOutput(
-        success=True, result=None, agent="echo", duration_ms=10,
-        requires_approval=True,
-        approval_prompt="ECHO ready to send 3 emails — review?",
+    await CruzAgent()._notify_approval_gate(
+        sub_result=_approval_output("echo", "ECHO ready to send 3 emails — review?"),
+        conversation_id="conv-1",
+        trace_id="t-1",
     )
-    agent = CruzAgent()
-    # Use an existing helper for invoking the post-tool gate logic. If no
-    # helper exists, structure the test around the public process() call
-    # with the sub_result mocked in.
-    await agent._notify_approval_gate(sub_result, conversation_id="conv-1", trace_id="t-1")
     fake_push.send_to_user.assert_awaited_once()
-    payload = fake_push.send_to_user.await_args.kwargs.get("payload") \
-              or fake_push.send_to_user.await_args.args[1]
-    assert "approval" in payload.title.lower() or "review" in payload.title.lower()
-    assert "ECHO" in payload.body or "review" in payload.body.lower()
+    payload = fake_push.send_to_user.await_args.kwargs["payload"]
+    assert "ECHO" in payload.title
+    assert "approval" in payload.title.lower()
+    assert "ECHO" in payload.body or "send" in payload.body.lower()
+    assert payload.url == "/conversations/conv-1"
+
+
+@pytest.mark.asyncio
+async def test_cruz_helper_no_op_when_no_approval_required(fake_push, monkeypatch):
+    monkeypatch.setattr(
+        "agents.cruz.cruz_agent.get_push_service", lambda: fake_push,
+    )
+    from agents.cruz.cruz_agent import CruzAgent
+    non_approval = AgentOutput(
+        success=True, result="ok", agent="echo", duration_ms=5,
+        requires_approval=False,
+    )
+    await CruzAgent()._notify_approval_gate(
+        sub_result=non_approval, conversation_id="c", trace_id="t",
+    )
+    fake_push.send_to_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cruz_helper_no_op_when_push_service_none(fake_push, monkeypatch):
+    monkeypatch.setattr(
+        "agents.cruz.cruz_agent.get_push_service", lambda: None,
+    )
+    from agents.cruz.cruz_agent import CruzAgent
+    await CruzAgent()._notify_approval_gate(
+        sub_result=_approval_output(), conversation_id="c", trace_id="t",
+    )
+    fake_push.send_to_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cruz_helper_truncates_long_prompt(fake_push, monkeypatch):
+    monkeypatch.setattr(
+        "agents.cruz.cruz_agent.get_push_service", lambda: fake_push,
+    )
+    from agents.cruz.cruz_agent import CruzAgent
+    long_prompt = "x" * 500
+    await CruzAgent()._notify_approval_gate(
+        sub_result=_approval_output("echo", long_prompt),
+        conversation_id="c", trace_id="t",
+    )
+    payload = fake_push.send_to_user.await_args.kwargs["payload"]
+    assert len(payload.body) <= 100
+
+
+@pytest.mark.asyncio
+async def test_cruz_helper_swallows_dispatch_errors(fake_push, monkeypatch):
+    fake_push.send_to_user.side_effect = RuntimeError("FCM down")
+    monkeypatch.setattr(
+        "agents.cruz.cruz_agent.get_push_service", lambda: fake_push,
+    )
+    from agents.cruz.cruz_agent import CruzAgent
+    # Must NOT raise.
+    await CruzAgent()._notify_approval_gate(
+        sub_result=_approval_output(), conversation_id="c", trace_id="t",
+    )
 ```
 
-- [ ] **Step 2: Implement**
+- [ ] **Step 2: Run; verify failures**
 
-Add a helper in `agents/cruz/cruz_agent.py`:
+```bash
+pytest tests/agents/test_cruz_push.py -v
+```
+
+- [ ] **Step 3: Implement the helper**
+
+In `agents/cruz/cruz_agent.py`, add:
 
 ```python
     async def _notify_approval_gate(
-        self, sub_result: AgentOutput, conversation_id: str, trace_id: str,
+        self,
+        sub_result: AgentOutput,
+        conversation_id: str,
+        trace_id: str,
     ) -> None:
-        """Fire a push when a sub-agent returns requires_approval=True."""
+        """Fire FCM push when a sub-agent returns requires_approval=True.
+        Best-effort: degraded-mode no-op + swallows all dispatch errors."""
         if not sub_result.requires_approval:
             return
         try:
@@ -4045,7 +4636,7 @@ Add a helper in `agents/cruz/cruz_agent.py`:
                 return
             prompt = (sub_result.approval_prompt or "Action awaiting review")[:100]
             await push.send_to_user(
-                user_id=1,  # single-user for now — ride along when multi-user lands
+                user_id=1,  # single-user for now — extend when multi-user lands
                 payload=PushPayload(
                     title=f"{sub_result.agent.upper()} needs approval",
                     body=prompt,
@@ -4054,16 +4645,33 @@ Add a helper in `agents/cruz/cruz_agent.py`:
                 ),
             )
         except Exception:
-            self.logger.warning("cruz approval-gate push failed (non-fatal)", exc_info=True)
+            self.logger.warning(
+                "cruz approval-gate push failed (non-fatal)", exc_info=True,
+            )
 ```
 
-Call `_notify_approval_gate(sub_result, conversation_id, trace_id)` from the existing tool-result branch in `process()` and `stream_response()` immediately after the sub-agent returns.
+Then wire the call site. `grep -n "requires_approval\|approval_prompt" agents/cruz/cruz_agent.py` to find where sub-agent results are processed in `process()` and `stream_response()`. After every site that receives a sub-agent's `AgentOutput` from a tool dispatch, add:
 
-- [ ] **Step 3: Run + commit**
+```python
+        await self._notify_approval_gate(
+            sub_result=sub_output,
+            conversation_id=input.conversation_id,
+            trace_id=input.trace_id,
+        )
+```
+
+If `process()` and `stream_response()` both have a tool-result branch, the call goes in both.
+
+- [ ] **Step 4: Run; verify pass + existing CRUZ tests still green**
 
 ```bash
-pytest tests/agents/test_cruz_agent.py -v
-git add agents/cruz/cruz_agent.py tests/agents/test_cruz_agent.py
+pytest tests/agents/test_cruz_push.py tests/agents/test_cruz_agent.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add agents/cruz/cruz_agent.py tests/agents/test_cruz_push.py
 git commit -m "feat(sp7): CRUZ fires FCM push on sub-agent requires_approval=True"
 ```
 

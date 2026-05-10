@@ -138,7 +138,7 @@ This sub-spec adheres to all charter §3 rules without override. No new agents (
 
 Wrap `_join_and_run` in a backoff loop. Schedule: `[1, 2, 4, 8, 16, 30, 60, 60, 60]` seconds, capped at 60s. Reset attempt counter on clean disconnect (returned normally from `_run_session`). Emit a Telegram alert on attempt ≥ 3 — frequent reconnects indicate LiveKit-server-side or network issues worth surfacing.
 
-Mirror in `cruz-voice-worker`: livekit-agents already restarts the entrypoint on exit. Change current "log and continue" on Deepgram WS disconnect to `raise` — let the harness rejoin cleanly.
+Mirror in `cruz-voice-worker`: livekit-agents already restarts the entrypoint on exit. Change current "log and continue" on Deepgram WS disconnect to `raise` — let the harness rejoin cleanly. The livekit-agents harness catches the raised exception, logs it, and dispatches a fresh entrypoint job for the same room — no PM2 restart, no cascading crash.
 
 ### 3.3 Mic-stream restart on device-disconnect
 
@@ -222,7 +222,7 @@ If the ONNX model fails to load (corrupt, openWakeWord version mismatch), raise 
 
 ### 4.5 Real-sample collection during burn-in
 
-The burn-in script's synthetic round-trip extends to also dump 5 seconds of pre-trigger audio when a real wake word fires. Over 24h this yields enough natural-condition positive clips for a follow-up retrain. Real-sample retraining is **post-burn-in polish**, not part of the SP7 exit gate. Listed in `v2-burn-in-checklist.md`.
+The burn-in script's synthetic round-trip extends to also dump 5 seconds of pre-trigger audio when a real wake word fires. Clips are written to `scripts/wakeword/samples/positive/burnin-<timestamp>.wav`, which is gitignored (per §4.1 directory layout) — these are biometric data and must never be committed (R12). Over 24h this yields enough natural-condition positive clips for a follow-up retrain. Real-sample retraining is **post-burn-in polish**, not part of the SP7 exit gate. Listed in `v2-burn-in-checklist.md`.
 
 ---
 
@@ -290,7 +290,7 @@ If no source logo exists, create a simple "C" wordmark white-on-`#0a0a0a` (match
 
 `registerType: "autoUpdate"` + `skipWaiting: true` + `clientsClaim: true` means new SW versions take over immediately on next page load. Trade-off: faster shipping vs. risk of pushing a buggy SW to all clients instantly.
 
-Mitigation: every PR that touches frontend bumps a `SW_VERSION` constant and runs a manual phone-side QA check (install, swipe-refresh, confirm version).
+Mitigation: every PR that touches frontend bumps a `SW_VERSION` constant in `frontend/src/sw-version.ts` (imported by `main.tsx` registration code, logged on `activate`). PR description includes a manual phone-side QA check (install, swipe-refresh, confirm version logged).
 
 ### 5.6 Migration from current self-destroying SW
 
@@ -406,7 +406,7 @@ Three follow-ups documented but not wired in SP7:
 
 `frontend/public/firebase-messaging-sw.js` (must live at the public root — FCM requirement). Loads `firebase-app-compat` + `firebase-messaging-compat` from gstatic CDN. Handles `onBackgroundMessage` (showNotification) and `notificationclick` (open the URL from `payload.data.url`).
 
-Workbox SW (Vite-PWA-generated) and `firebase-messaging-sw.js` are **separate** service workers. Both register at `/` scope and coexist — Workbox handles fetch/cache, Firebase handles push. This pattern is documented in vite-plugin-pwa.
+Workbox SW (Vite-PWA-generated) and `firebase-messaging-sw.js` are **separate** service workers. Both register at `/` scope and coexist — Workbox handles `fetch`/cache, Firebase handles `push` and `notificationclick`. Per FCM convention, the Firebase SW owns push-event handling; the Workbox SW does not register for push. Click handling lives in `firebase-messaging-sw.js` (see §6.7 snippet). This pattern is documented in vite-plugin-pwa.
 
 ### 6.8 Frontend — permission UI
 
@@ -448,7 +448,7 @@ Anything else (network, 5xx) keeps the token, retries on next dispatch. Backgrou
 
 | Module | Coverage | Test count |
 |---|---|---|
-| `services/push.py` | success, UnregisteredError → delete, InvalidArgumentError → delete, network exception keeps, fan-out across N tokens, partial failure mid-fanout | ~12 |
+| `services/push.py` | success, UnregisteredError → delete, InvalidArgumentError → delete, network exception keeps, fan-out across N tokens, partial failure mid-fanout, **degraded-mode no-op when PushService is None (FCM_SA_PATH unset)** | ~13 |
 | `services/voice.py:WakeWordDetector` (ONNX path) | path string detection, fail-loud on load error | ~3 |
 | `frontend/src/lib/conversation-cache.ts` | rememberMessages keeps last 50, recall by id, eviction (Vitest + fake-indexeddb) | ~6 |
 | `frontend/src/state/outbox.ts` | optimistic add, replay confirmation, retry button | ~5 |

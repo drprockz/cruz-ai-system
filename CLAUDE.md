@@ -268,6 +268,15 @@ Claude generating: "The deployment to production... [streaming]
                      TTS starts here, before Claude finishes
 ```
 
+### Two voice entry points
+
+| Component | Use case | Stack |
+|---|---|---|
+| `workers/voice_daemon.py` (SP7) | Mac Mini's physical mic & speakers — always-on FRIDAY-style listener | OpenWakeWord/Porcupine → faster-whisper → POST /command → Inworld TTS → sounddevice |
+| `workers/voice_agent/` | Web-client browsers in LiveKit rooms | LiveKit + Deepgram STT/TTS |
+
+The voice daemon talks to CRUZ over plain HTTP (`POST /command`) so it survives the API process restarting. Conversation ID stays stable for the daemon's lifetime — every spoken turn shares context. SIGINT/SIGTERM trigger clean shutdown.
+
 ---
 
 ## Memory Architecture
@@ -617,13 +626,17 @@ cruz-ai-system/
 │   ├── ollama.py                # Ollama local model client
 │   └── voice.py                 # Whisper STT + Inworld TTS pipeline
 │
-├── workers/                     # ARQ background task workers
-│   ├── arq_worker.py            # Worker entrypoint
+├── workers/                     # ARQ background task workers + always-on daemons
+│   ├── arq_worker.py            # ARQ worker entrypoint
+│   ├── voice_daemon.py          # Always-on local mic/speaker loop (SP7)
+│   ├── voice_agent/             # LiveKit web-client bridge (separate from voice_daemon)
+│   ├── handlers/                # SP5 handler modules (workers/handlers/<name>.py)
 │   └── tasks/
 │       ├── pulse_tasks.py       # 6 AM daily briefing
 │       ├── raw_tasks.py         # 3 AM research update
 │       ├── reach_tasks.py       # 2 AM lead generation
-│       └── mark_tasks.py        # Post-commit documentation
+│       ├── mark_tasks.py        # Post-commit documentation
+│       └── webhook_tasks.py     # GitHub/Vercel/GCal dispatch (SP5)
 │
 ├── tests/
 │   ├── agents/                  # One file per agent (written same day)

@@ -3,7 +3,7 @@
 > **FRIDAY from Iron Man — built for a freelance developer.**
 > You talk to CRUZ. CRUZ handles everything else.
 
-**Status (2026-04-14):** Backend command-center is production-ready. Phase 1–5 scope complete (26/31 tasks), Phase 6 code-side delivered — load harness in `scripts/load/`, uptime probe in `scripts/uptime/`, readiness checklist at `docs/production/readiness_checklist.md`. Only remaining scoped feature: **5.4 React Native app**.
+**Status (2026-05-10):** Backend command-center is production-ready. Phase 1–5 scope complete (26/31 tasks), Phase 6 code-side delivered, SP5 (event loop) + SP6 (screen perception) merged, SP7 (multi-modal polish) in progress — voice daemon (`workers/voice_daemon.py`) shipped 2026-05-10. Remaining: 5.4 React Native app, FCM push delivery, custom "Hey CRUZ" wake-word, ops gate sign-off.
 
 CRUZ is a personal AI command center running 24/7 on a Mac Mini M4. One natural-language interface routes to 12 specialist agents — code generation, email drafting, deployments, lead generation, meeting transcription, sprint planning, and more.
 
@@ -64,9 +64,10 @@ No separate routing LLM call. Claude's native `tool_use` IS the router — zero 
 | Cache/Queue | Redis 7 + ARQ (background workers) |
 | Vector DB | Qdrant (semantic memory, all-MiniLM-L6-v2) |
 | Migrations | Alembic |
-| Voice STT | Whisper Large v3 (local) |
-| Voice TTS | Inworld TTS 1.5 Max (streaming) |
-| Wake word | Porcupine 3.x ("Hey CRUZ") |
+| Voice STT | faster-whisper (CTranslate2, ~4x faster than transformers) |
+| Voice TTS | Inworld TTS 1.5 Max (streaming) + macOS `say` fallback |
+| Wake word | OpenWakeWord (default) or Porcupine 3.x — both supported |
+| Voice daemon | `workers/voice_daemon.py` — always-on local mic/speaker loop |
 | Frontend | React 18 + TypeScript + Tailwind (Phase 5) |
 | Mobile | React Native + PWA (Phase 5) |
 | Process mgr | PM2 (Phase 6) |
@@ -223,7 +224,7 @@ See [PROGRESS.md](PROGRESS.md) for detailed task tracking.
 | 5 — Intelligence | ⚠️ 3/4 | RAW, PULSE, cross-device done; React Native app pending |
 | 6 — Production | ❌ Not started | PM2, monitoring, Cloudflare, load testing |
 
-**796 tests passing (all mock-based — no real integration tests yet).**
+**1,090+ tests passing (all mock-based — no real integration tests yet).** Voice daemon adds 17 mocked tests covering wake-word listen, VAD-bounded capture, CRUZ POST, sounddevice playback, and the full one-turn loop.
 
 > ⚠️ **See [PROGRESS.md](./PROGRESS.md) "Reality Gaps" section** — phases 2-5 have scope-complete
 > tasks but spec-level integrations (email send, GitHub comments, Notion, deploy rollback, TTS)

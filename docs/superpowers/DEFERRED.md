@@ -92,7 +92,7 @@ UPDATE projects SET local_path = '/Users/darshan/Projects/midar'          WHERE 
 
 ### Two SP2 follow-ups (not gate-blocking)
 
-- [ ] `services/llm.chat` does not yet exist — `_extract_and_write_pattern()` lazily imports it; either land a thin shim (one function call into the existing LLMRouter) or drop pattern inference until SP5 (where llm.chat may already exist for proactive agents)
+- [x] ~~`services/llm.chat` does not yet exist — `_extract_and_write_pattern()` lazily imports it; either land a thin shim or drop pattern inference~~ — ✅ Resolved 2026-05-10. `services/llm/__init__.py` exports `chat` (added during the LLMRouter refactor); the lazy import inside `_extract_and_write_pattern()` was lifted to the module-level imports of `services/knowledge_base.py` (commit `57a4d4d`). No shim needed — the router itself satisfies the contract.
 - [ ] CRUZ retrofit `process()` and `stream_response()` are now mostly duplicate-shaped — consider a refactor to share KB hook logic. **Defer this** until SP3 lands and a third entry point is on the horizon (rule of three).
 
 ---
@@ -143,6 +143,38 @@ Five items surfaced during SP6 implementation reviews. None block merge; tracked
 ### Telemetry follow-ups
 
 - [ ] **Vision token-budget telemetry.** `analysis.tokens_used` flows back through `AgentOutput.tokens_used` into `agent_logs`, but there's no separate aggregation tracking screen_perception cost. After Gate 4 baseline run, add a simple Grafana panel or query breaking out `screen_perception` cost. **Estimate:** 30 min query + a panel.
+
+---
+
+## SP7 — Multi-modal Polish (follow-ups)
+
+The voice daemon (`workers/voice_daemon.py`) is shipped and unit-tested. These items remain before SP7 can be signed off.
+
+### Voice daemon — operator install
+
+- [ ] On Mac Mini: `pip install pyaudio sounddevice soundfile silero-vad openwakeword` (PyAudio needs `brew install portaudio` first)
+- [ ] Grant microphone permission to the venv-py311 Python binary (System Settings → Privacy & Security → Microphone)
+- [ ] `pm2 start ecosystem.config.js --only voice-daemon` — confirm it stays up >24h with `pm2 logs voice-daemon`
+- [ ] Live test: speak "Hey Jarvis" → confirm CRUZ responds via speakers (default wake-word until 7.8 lands)
+- [ ] Confirm Telegram alert fires when `cruz-api` is stopped (degraded-mode test)
+
+### Voice daemon — code follow-ups (not gate-blocking)
+
+- [ ] **Custom "Hey CRUZ" wake-word.** Currently uses `hey_jarvis` (openWakeWord pretrained). Options: (a) train a custom OpenWakeWord model from ~30 min of recorded "Hey CRUZ", (b) get a Picovoice consumer key + train a `.ppn` via console.picovoice.ai. Either gives the proper FRIDAY-style branding.
+- [ ] **Audio cue before capture.** Currently uses `mac_controller.notify(sound=True)` which plays a notification banner sound. A short MP3 cue file would be cleaner (≤500 ms `boop.mp3` in `assets/`).
+- [ ] **Capture barge-in.** If user speaks while CRUZ is talking back, the daemon should interrupt playback and start capturing immediately. Currently `sd.wait()` blocks until playback finishes.
+- [ ] **Conversation timeout.** The session `conversation_id` lasts the daemon's lifetime — that's hours/days. After 30 min idle the session should rotate so CRUZ doesn't drag stale context forward.
+
+### FCM push (Task 1.4 from SP7 design)
+
+- [ ] `services/push.py:PushService.send_to_user` — real FCM dispatch via firebase-admin (currently raises `NotImplementedError`)
+- [ ] `POST /devices/register` endpoint to upsert device tokens
+- [ ] Test with real device token + `firebase-admin` initialized from service-account JSON
+
+### PWA offline polish
+
+- [ ] `frontend/sw.js` — service worker with offline shell + queue for `POST /command` while offline
+- [ ] Background-sync to flush queued commands once connectivity returns
 
 ---
 

@@ -1,7 +1,7 @@
 # CRUZ AI System — Build Progress
 
-**Last updated:** April 14, 2026
-**Tests passing:** 1073 / 1073 mocked + 10 skipped (9 real-PostgreSQL integration tests opt-in via `DATABASE_URL_TEST`; 1 locust import guard when `locust` not installed)
+**Last updated:** May 10, 2026
+**Tests passing:** 1073+ mocked + 17 new voice-daemon tests + 27 KB tests (44/44 directly affected) — see SP7 entry below
 
 > ⚠️ **AUDIT NOTE (2026-04-13):** Task-scope completion is accurate, but a deep audit revealed
 > the spec (CLAUDE.md) promises agent integrations that were never in the task list. The
@@ -160,11 +160,32 @@ install`) is the only remaining step; the readiness checklist covers it.
   base64-decode `audioContent` from JSON response. Default voice is the
   JARVIS preset `default--ypb7u4pb7ydy8zij82pta__jarvis_20`.
 
+## SP7 — Multi-modal Polish (in progress, 2026-05-10)
+
+| Task | Description | Status |
+|---|---|---|
+| 7.1 | `services/push.py` — PushPayload, SendResult, PushService init (FCM scaffolding) | ✅ scaffolded |
+| 7.2 | `migrations/0007_device_tokens.py` — Alembic migration for FCM device tokens | ✅ |
+| 7.3 | KB shim — lift lazy `services.llm.chat` import in `knowledge_base.py` to module level | ✅ 2026-05-10 (commit `57a4d4d`) |
+| 7.4 | `workers/voice_daemon.py` — always-on local voice daemon (Porcupine + Whisper + Inworld) | ✅ 2026-05-10 (commit `2b1f530`) |
+| 7.5 | `ecosystem.config.js` — `voice-daemon` PM2 entry alongside LiveKit `cruz-daemon` | ✅ 2026-05-10 |
+| 7.6 | `tests/workers/test_voice_daemon.py` — 17 mocked tests (pyaudio, VAD, httpx, sd/sf) | ✅ 2026-05-10 |
+| 7.7 | FCM push delivery (`PushService.send_to_user`) | ⏭️ pending |
+| 7.8 | Custom "Hey CRUZ" wake-word model (currently `hey_jarvis` default) | ⏭️ pending |
+| 7.9 | PWA offline polish | ⏭️ pending |
+
+**Voice daemon design:**
+- Loop: `WakeWordDetector.detect()` → audio cue (mac.notify) → VAD-bounded capture (≤30 s, 1.5 s silence) → `VoicePipeline.transcribe()` → `POST /command` (stream=False, device=mac_mini) → `VoicePipeline.speak()` → `sounddevice` playback
+- Stable `conversation_id` for the daemon's lifetime → CRUZ retains full context across spoken turns
+- `httpx.ConnectError` to `/command` → `AlertService.notify("warning", …)` to Telegram (degraded-mode signal)
+- SIGINT / SIGTERM trigger clean shutdown (close PyAudio stream + WakeWordDetector)
+- Pure-HTTP boundary — no agent imports — survives the API process restarting independently
+
 ## What's next
 
 - **5.4 — React Native app** (voice, conversation history, tasks, push). Only remaining scoped feature.
 - **Ops gating** — 6.2 / 6.4 / 6.5 install steps + run the 72h uptime probe.
-- **Voice daemon** — glue wake-word → STT → /command → TTS → speakers into a single always-listening loop.
+- **SP7 follow-ups** — 7.7 FCM `send_to_user`, 7.8 custom wake-word model, 7.9 PWA offline polish.
 
 ---
 

@@ -2040,9 +2040,9 @@ def test_60_second_burn_in_smoke(tmp_path):
     out = tmp_path / "burn.jsonl"
     r = subprocess.run(
         ["python", "scripts/uptime/voice_burn_in.py",
-         "--hours", str(1.0/60.0),  # 1 minute
+         "--hours", "0.05",  # 3 minutes — long enough for 2 ticks + a synthetic round-trip
          "--output", str(out)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=300,
     )
     assert r.returncode == 0, r.stderr
     assert out.exists()
@@ -2082,18 +2082,6 @@ VOICE_BURN_IN=1 pytest tests/integration/test_voice_burn_in_smoke.py -v
 ```
 
 The smoke test internally runs `--hours 0.05` (3 minutes) — long enough for two ticks (60s each) plus the synthetic round-trip cycle to fire and emit a meaningful summary line. Expected to complete within 4 minutes wall clock. If it fails, debug before kicking off the full 24h.
-
-Adjust the smoke test if it currently uses `1.0/60.0` hours (one minute) — the harness's tick interval is 60 seconds, so a one-minute window emits zero or one tick and won't exercise the synthetic path. Update the test:
-
-```python
-# tests/integration/test_voice_burn_in_smoke.py — update --hours
-r = subprocess.run(
-    ["python", "scripts/uptime/voice_burn_in.py",
-     "--hours", "0.05",  # 3 minutes — exercises 2 ticks + synthetic
-     "--output", str(out)],
-    capture_output=True, text=True, timeout=300,
-)
-```
 
 - [ ] **Step 2: Pre-burn-in checklist**
 

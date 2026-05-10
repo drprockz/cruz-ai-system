@@ -1,6 +1,6 @@
 // CRUZ AI System — PM2 process manager config.
 //
-// All 5 CRUZ services under PM2: api, worker, voice-worker, daemon, ui.
+// All 6 CRUZ services under PM2: api, worker, voice-worker, daemon, voice-daemon, ui.
 // Start everything with a single command:
 //
 //   ./scripts/start-cruz.sh
@@ -128,7 +128,35 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
     },
 
-    // ── 5. Frontend (pre-built static via `serve`) ────────────────────────────
+    // ── 5. Always-on local voice daemon (wake-word + Whisper + Inworld) ─────────
+    // Listens on the Mac Mini's physical mic. Uses local Whisper STT +
+    // Inworld TTS — NOT LiveKit. Requires INWORLD_API_KEY and optionally
+    // WAKE_WORD_BACKEND / PICOVOICE_ACCESS_KEY.
+    // All inherited from shell environment — start via start-cruz.sh.
+    {
+      name: "voice-daemon",
+      script: VENV_PY311,
+      args: "workers/voice_daemon.py",
+      cwd: ROOT,
+      interpreter: "none",
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "512M",
+      min_uptime: "10s",
+      max_restarts: 5,
+      restart_delay: 3000,
+      kill_timeout: 10000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        PYTHONPATH: ROOT,
+      },
+      out_file: path.join(LOGS_DIR, "voice-daemon-out.log"),
+      error_file: path.join(LOGS_DIR, "voice-daemon-err.log"),
+      merge_logs: true,
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    },
+
+    // ── 6. Frontend (pre-built static via `serve`) ────────────────────────────
     // start-cruz.sh runs `cd frontend && npm run build` before pm2 start,
     // so frontend/dist is always fresh.  `serve` is zero-config and stable.
     {

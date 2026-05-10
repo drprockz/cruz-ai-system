@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from services.db import get_db_service
 from services.embedding import EmbeddingService, get_embedding_service
+from services.llm import chat as llm_chat
 from services.qdrant import QdrantService, get_qdrant_service
 
 logger = logging.getLogger("cruz.services.knowledge_base")
@@ -321,7 +322,6 @@ class KnowledgeBaseService:
     ) -> None:
         """Background task: call Claude Sonnet to clean the pattern, then write it."""
         try:
-            from services.llm import chat as llm_chat
             messages = [{
                 "role": "user",
                 "content": (
